@@ -16,6 +16,9 @@ import {
 import handler from "../api/admin-approve.js";
 import { saveOrderSnapshot, loadOrderSnapshot } from "../src/session/orderStore.js";
 import { notifyAdmins } from "../src/admin/notify.js";
+import { sendAdminOrderAlertEmail } from "../src/admin/email.js";
+import { escapeHtml, jsonForScript } from "../src/shared/html.js";
+import { __resetEnvForTests } from "../src/config/env.js";
 import type { OrderData } from "../src/shared/types.js";
 
 const originalFetch = globalThis.fetch;
@@ -289,5 +292,132 @@ test("notifyAdmins: snapshots order, generates OTP code, and does NOT send Whats
 
   // 3. No Meta Cloud API calls were made (no WhatsApp message sent to admins)
   assert.ok(!fetchCalls.some((c) => c.url.includes("graph.facebook.com")));
+});
+
+// ---------------------------------------------------------------------------
+// CB-01: stored XSS — customer-controlled fields must be HTML-escaped in the
+// admin portal page and the HTML parts of the order emails (the plain-text
+// fallback keeps the raw values; it is not HTML).
+// ---------------------------------------------------------------------------
+
+const XSS_NAME = `<script>alert(1)</script>`;
+const XSS_CITY = `"><img src=x onerror=alert(2)>`;
+const XSS_PHONE = `+91' onmouseover='alert(3)`;
+const XSS_ITEM = `Dri-Fit <b>Evil</b> Tee`;
+const XSS_COLOR = `Red & "Blue"`;
+
+function createXssMockOrder(orderId = "CTW-261026-01"): OrderData {
+  const order = createMockOrder(orderId);
+  order.name = XSS_NAME;
+  order.city = XSS_CITY;
+  order.phone = XSS_PHONE;
+  order.catalogItemName = XSS_ITEM;
+  order.catalogColor = XSS_COLOR;
+  return order;
+}
+
+test("escapeHtml & jsonForScript: escape all HTML metacharacters and script-breakout sequences", () => {
+  assert.equal(
+    escapeHtml(`<script>alert("x") & 'y'</script>`),
+    "&lt;script&gt;alert(&quot;x&quot;) &amp; &#39;y&#39;&lt;/script&gt;",
+  );
+  assert.equal(escapeHtml(null), "");
+  assert.equal(escapeHtml(undefined), "");
+
+  // jsonForScript must not allow a </script> breakout from inlined JSON.
+  const encoded = jsonForScript(`</script><img src=x onerror=alert(1)>`);
+  assert.ok(!encoded.includes("</"), "encoded JSON must not contain a raw closing tag");
+  assert.ok(encoded.includes("\\u003c"));
+});
+
+test("admin-approve GET: escapes customer-controlled fields in portal HTML (CB-01)", async () => {
+  const redis = new FakeRedis();
+  __setRedisForTests(redis);
+
+  const order = createXssMockOrder("CTW-261026-02");
+  await saveOrderSnapshot(order);
+
+  const token = createPortalToken(order.orderId);
+  const { req, res, getStatusCode, getData } = createMockReqRes({
+    method: "GET",
+    query: { orderId: order.orderId, token },
+  });
+
+  await handler(req, res);
+  assert.equal(getStatusCode(), 200);
+
+  const html = String(getData());
+
+  // Payloads appear ESCAPED, never as live HTML.
+  assert.ok(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), "name payload must be escaped");
+  assert.ok(!html.includes("<script>alert(1)</script>"), "raw script payload must never appear");
+  assert.ok(
+    html.includes("&quot;&gt;&lt;img src=x onerror=alert(2)&gt;"),
+    "city payload (attribute breakout) must be escaped",
+  );
+  assert.ok(!html.includes("<img src=x onerror=alert(2)>"), "raw img payload must never appear");
+  assert.ok(html.includes("&#39; onmouseover=&#39;alert(3)"), "phone payload (single-quote attr) must be escaped");
+  assert.ok(html.includes("Dri-Fit &lt;b&gt;Evil&lt;/b&gt; Tee"), "catalogItemName payload must be escaped");
+
+  // Sanity: order still renders normally alongside the escaping.
+  assert.ok(html.includes("Order CTW-261026-02"), "must still display order ID");
+  assert.ok(html.includes("₹17,950"), "must still display advance due");
+});
+
+test("sendAdminOrderAlertEmail: escapes HTML email, keeps plain-text fallback raw (CB-01)", async () => {
+  const prevApiKey = process.env["RESEND_API_KEY"];
+  process.env["RESEND_API_KEY"] = "re_test_live_fake";
+  __resetEnvForTests();
+
+  const captured: Array<{ url: string; body: any }> = [];
+  globalThis.fetch = (async (url: any, init: any) => {
+    captured.push({ url: String(url), body: JSON.parse(String(init.body)) });
+    return new Response(JSON.stringify({ id: "mock_res" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as any;
+
+  try {
+    const order = createXssMockOrder("CTW-261026-03");
+    const result = await sendAdminOrderAlertEmail(
+      order,
+      "123456",
+      "https://example.com/portal",
+      "https://example.com/resend",
+      `https://example.com/receipt.jpg?a="b"&c=<script>4</script>`,
+    );
+    assert.equal(result.ok, true);
+
+    const resendCall = captured.find((c) => c.url.includes("api.resend.com"));
+    assert.ok(resendCall, "must dispatch via Resend API");
+    const html: string = resendCall!.body.html;
+    const text: string = resendCall!.body.text;
+
+    // HTML email: every customer-controlled payload appears escaped.
+    assert.ok(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), "name payload must be escaped in HTML email");
+    assert.ok(!html.includes("<script>alert(1)</script>"), "raw script payload must never appear in HTML email");
+    assert.ok(
+      html.includes("&quot;&gt;&lt;img src=x onerror=alert(2)&gt;"),
+      "city payload must be escaped in HTML email",
+    );
+    assert.ok(html.includes("&#39; onmouseover=&#39;alert(3)"), "phone payload must be escaped in HTML email");
+    assert.ok(html.includes("Dri-Fit &lt;b&gt;Evil&lt;/b&gt; Tee"), "catalogItemName must be escaped in HTML email");
+    assert.ok(html.includes("Red &amp; &quot;Blue&quot;"), "catalogColor must be escaped in HTML email");
+    // Screenshot URL is interpolated into quoted attributes — must be escaped there too.
+    assert.ok(
+      html.includes("https://example.com/receipt.jpg?a=&quot;b&quot;&amp;c=&lt;script&gt;4&lt;/script&gt;"),
+      "screenshot URL must be attribute-escaped in HTML email",
+    );
+
+    // Plain-text fallback keeps the raw (unescaped) values and is not broken.
+    assert.ok(text.includes(XSS_NAME), "text fallback must keep the raw name");
+    assert.ok(text.includes(XSS_CITY), "text fallback must keep the raw city");
+    assert.ok(text.includes("Customer: " + XSS_NAME), "text fallback customer line must be intact");
+  } finally {
+    if (prevApiKey === undefined) delete process.env["RESEND_API_KEY"];
+    else process.env["RESEND_API_KEY"] = prevApiKey;
+    __resetEnvForTests();
+  }
 });
 

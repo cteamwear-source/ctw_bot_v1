@@ -11,6 +11,7 @@ import {
 import { loadOrderSnapshot } from "../src/session/orderStore.js";
 import { updateOrderRowStatus } from "../src/sheets/client.js";
 import { renderConfirmationDm } from "../src/shared/render.js";
+import { escapeHtml, jsonForScript } from "../src/shared/html.js";
 import { sendMessage } from "../src/whatsapp/metaClient.js";
 import { sendSecondaryOtpEmail } from "../src/admin/email.js";
 import { getEnv } from "../src/config/env.js";
@@ -260,12 +261,15 @@ function renderPortalHtml(props: PortalRenderProps): string {
     }
   }
 
+  // CB-01: every order-derived value interpolated into this page goes through
+  // escapeHtml (text nodes + quoted attributes); script-inlined values use
+  // jsonForScript. sanitizeForSheet is NOT an HTML sanitizer.
   const sizeSplitHtml = order?.sizeSplit
     ? Object.entries(order.sizeSplit)
         .filter(([_, q]) => Number(q) > 0)
         .map(
           ([s, q]) =>
-            `<span class="size-badge"><strong>${s}:</strong> ${q}</span>`,
+            `<span class="size-badge"><strong>${escapeHtml(s)}:</strong> ${escapeHtml(q)}</span>`,
         )
         .join(" ")
     : "<em>Standard Mix</em>";
@@ -277,7 +281,7 @@ function renderPortalHtml(props: PortalRenderProps): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Order Verification · ${orderId}</title>
+  <title>Order Verification · ${escapeHtml(orderId)}</title>
   <style>
     :root {
       --primary: #2563eb;
@@ -566,7 +570,7 @@ function renderPortalHtml(props: PortalRenderProps): string {
     <header>
       <div>
         <div class="logo">Custom Teamwear · Verification Portal</div>
-        <h1 class="order-title">Order ${orderId}</h1>
+        <h1 class="order-title">Order ${escapeHtml(orderId)}</h1>
       </div>
       <div>
         ${
@@ -581,8 +585,8 @@ function renderPortalHtml(props: PortalRenderProps): string {
 
     ${
       banner
-        ? `<div class="banner banner-${banner.type}">
-            <span>${banner.message}</span>
+        ? `<div class="banner banner-${escapeHtml(banner.type)}">
+            <span>${escapeHtml(banner.message)}</span>
            </div>`
         : ""
     }
@@ -591,7 +595,7 @@ function renderPortalHtml(props: PortalRenderProps): string {
       !isProcessed && isOlderThan30Mins && !banner
         ? `<div class="banner banner-warning">
             <span>⏳ <strong>Order placed > 30 minutes ago:</strong> The initial verification code has likely expired. Click below to generate and email a fresh secondary OTP.</span>
-            <a href="${resendUrl}" class="btn btn-warning" style="padding: 6px 14px; font-size: 12px;">🔄 Request Secondary OTP</a>
+            <a href="${escapeHtml(resendUrl)}" class="btn btn-warning" style="padding: 6px 14px; font-size: 12px;">🔄 Request Secondary OTP</a>
            </div>`
         : ""
     }
@@ -603,23 +607,23 @@ function renderPortalHtml(props: PortalRenderProps): string {
         <table class="info-table">
           <tr>
             <td class="label">Customer</td>
-            <td class="val">${order?.name || "Customer"} (${order?.phone || "—"})</td>
+            <td class="val">${escapeHtml(order?.name || "Customer")} (${escapeHtml(order?.phone || "—")})</td>
           </tr>
           <tr>
             <td class="label">City</td>
-            <td class="val">${order?.city || "—"}</td>
+            <td class="val">${escapeHtml(order?.city || "—")}</td>
           </tr>
           <tr>
             <td class="label">Timeline</td>
             <td class="val" style="color: ${order?.timelineUrgent ? "#dc2626" : "inherit"}">
-              ${order?.timeline || "Standard"} ${order?.timelineUrgent ? "⚠️ (Urgent)" : ""}
+              ${escapeHtml(order?.timeline || "Standard")} ${order?.timelineUrgent ? "⚠️ (Urgent)" : ""}
             </td>
           </tr>
           <tr>
             <td class="label">T-Shirt Tier</td>
             <td class="val">
-              ${order?.qty || 0} pcs · ${order?.tier || "Standard"}
-              ${order?.catalogItemName ? `(${order.catalogItemName})` : ""}
+              ${order?.qty || 0} pcs · ${escapeHtml(order?.tier || "Standard")}
+              ${order?.catalogItemName ? `(${escapeHtml(order.catalogItemName)})` : ""}
             </td>
           </tr>
           <tr>
@@ -628,7 +632,7 @@ function renderPortalHtml(props: PortalRenderProps): string {
           </tr>
           <tr>
             <td class="label">Print Method</td>
-            <td class="val">${order?.printMethod || "Standard"}</td>
+            <td class="val">${escapeHtml(order?.printMethod || "Standard")}</td>
           </tr>
           <tr>
             <td class="label">T-Shirt Total</td>
@@ -652,11 +656,11 @@ function renderPortalHtml(props: PortalRenderProps): string {
         <div class="screenshot-box">
           ${
             screenshotUrl
-              ? `<a href="${screenshotUrl}" target="_blank">
-                  <img src="${screenshotUrl}" alt="Payment Proof" class="screenshot-img" />
+              ? `<a href="${escapeHtml(screenshotUrl)}" target="_blank">
+                  <img src="${escapeHtml(screenshotUrl)}" alt="Payment Proof" class="screenshot-img" />
                  </a>
                  <div style="margin-top: 10px;">
-                   <a href="${screenshotUrl}" target="_blank" style="font-size: 13px; color: var(--primary);">View Full Resolution Image ↗</a>
+                   <a href="${escapeHtml(screenshotUrl)}" target="_blank" style="font-size: 13px; color: var(--primary);">View Full Resolution Image ↗</a>
                  </div>`
               : `<div style="padding: 40px 10px; background: #f1f5f9; border-radius: 8px; color: var(--text-muted); font-size: 14px;">
                    No direct image URL found in snapshot.<br>Payment screenshot was acknowledged via WhatsApp.
@@ -673,7 +677,7 @@ function renderPortalHtml(props: PortalRenderProps): string {
           ? `<div style="font-size: 16px; font-weight: 700; color: ${
               processedAction === "confirm" ? "var(--success)" : "var(--danger)"
             };">
-              This order was already processed as: <strong>${processedAction?.toUpperCase()}</strong>.
+              This order was already processed as: <strong>${escapeHtml(processedAction?.toUpperCase())}</strong>.
              </div>
              <p style="font-size: 13px; color: var(--text-muted); margin-top: 6px;">
                Google Sheets CRM has been updated. No further action needed.
@@ -702,7 +706,7 @@ function renderPortalHtml(props: PortalRenderProps): string {
     <div class="modal-content">
       <div class="modal-title">🔐 Enter 6-Digit Verification Code</div>
       <div class="modal-desc">
-        Enter the 6-digit approval code sent to <strong>${adminEmailsText}</strong> to confirm payment for order <strong>${orderId}</strong>:
+        Enter the 6-digit approval code sent to <strong>${escapeHtml(adminEmailsText)}</strong> to confirm payment for order <strong>${escapeHtml(orderId)}</strong>:
       </div>
 
       <div id="modalSuccess" class="modal-success"></div>
@@ -740,8 +744,8 @@ function renderPortalHtml(props: PortalRenderProps): string {
   </div>
 
   <script>
-    const orderId = ${JSON.stringify(orderId)};
-    const token = ${JSON.stringify(token)};
+    const orderId = ${jsonForScript(orderId)};
+    const token = ${jsonForScript(token)};
     
     const modal = document.getElementById("otpModal");
     const openConfirmBtn = document.getElementById("openConfirmBtn");
