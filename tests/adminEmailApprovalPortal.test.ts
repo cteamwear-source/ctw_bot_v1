@@ -19,6 +19,8 @@ import { notifyAdmins } from "../src/admin/notify.js";
 import { sendAdminOrderAlertEmail, sendEmailWithResend } from "../src/admin/email.js";
 import { escapeHtml, jsonForScript } from "../src/shared/html.js";
 import { __resetEnvForTests } from "../src/config/env.js";
+import { __setOrdersSheetForTests } from "../src/sheets/client.js";
+import { FakeOrdersSheet, createFakeOrdersWorksheet } from "./support/fakeOrdersSheet.js";
 import type { OrderData } from "../src/shared/types.js";
 
 const originalFetch = globalThis.fetch;
@@ -209,8 +211,16 @@ test("admin-approve POST confirm: validates OTP and confirms order", async () =>
   const redis = new FakeRedis();
   __setRedisForTests(redis);
 
+  // Inject fake orders sheet so the confirm succeeds
+  const fakeOrdersSheet = new FakeOrdersSheet();
+  __setOrdersSheetForTests(createFakeOrdersWorksheet(fakeOrdersSheet));
+
   const order = createMockOrder("CTW-261014-04");
   await saveOrderSnapshot(order);
+
+  // Also append to the fake sheet so updateOrderRowStatus can find it
+  const { appendOrderRow } = await import("../src/sheets/client.js");
+  await appendOrderRow(order);
 
   const token = createPortalToken(order.orderId);
   const code = await createApprovalCode("order", order.orderId);
@@ -242,6 +252,8 @@ test("admin-approve POST confirm: validates OTP and confirms order", async () =>
   await handler(dupReq, dupRes);
   assert.equal(dupCode(), 400);
   assert.ok(dupData().error.includes("already been"));
+
+  __setOrdersSheetForTests(undefined);
 });
 
 test("admin-approve POST resend_otp: generates secondary code via fail-safe", async () => {

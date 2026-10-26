@@ -181,9 +181,18 @@ async function handlePost(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ ok: false, error: "Order was already processed concurrently." });
     }
 
-    await updateOrderRowStatus(orderId, "Payment Issue").catch((err) => {
+    try {
+      await updateOrderRowStatus(orderId, "Payment Issue");
+    } catch (err) {
       console.error(`[admin-approve] Failed to update sheet on issue for ${orderId}:`, err);
-    });
+      // Release the claim so a retry can succeed
+      const { getRedis } = await import("../src/session/redisClient.js");
+      await getRedis().del(`admin-action:${orderId}`).catch(() => {});
+      return res.status(500).json({
+        ok: false,
+        error: `Order was flagged as Payment Issue, but CRM update failed — the claim has been released so you can retry. Error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
 
     return res.status(200).json({
       ok: true,
@@ -232,9 +241,18 @@ async function handlePost(req: VercelRequest, res: VercelResponse) {
     }
 
     // Update CRM Google Sheet
-    await updateOrderRowStatus(orderId, "Confirmed").catch((err) => {
+    try {
+      await updateOrderRowStatus(orderId, "Confirmed");
+    } catch (err) {
       console.error(`[admin-approve] Failed to update sheet on confirm for ${orderId}:`, err);
-    });
+      // Release the claim so a retry can succeed
+      const { getRedis } = await import("../src/session/redisClient.js");
+      await getRedis().del(`admin-action:${orderId}`).catch(() => {});
+      return res.status(500).json({
+        ok: false,
+        error: `Order was confirmed, but CRM update failed — the claim has been released so you can retry. Error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
 
     // Send WhatsApp confirmation DM to Customer
     const orderSnap = await loadOrderSnapshot(orderId);

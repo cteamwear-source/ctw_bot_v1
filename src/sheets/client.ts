@@ -23,9 +23,17 @@ function logoFileIdSummary(order: OrderData): string {
   return order.logos.map((logo) => logo.fileId).join(", ");
 }
 
+// Test injection for the orders sheet (like redisClient)
+let testOrdersSheet: GoogleSpreadsheetWorksheet | undefined;
+
+export function __setOrdersSheetForTests(sheet: GoogleSpreadsheetWorksheet | undefined): void {
+  testOrdersSheet = sheet;
+}
+
 let cachedSheet: GoogleSpreadsheetWorksheet | undefined;
 
 async function getOrdersSheet(): Promise<GoogleSpreadsheetWorksheet> {
+  if (testOrdersSheet) return testOrdersSheet;
   if (cachedSheet) return cachedSheet;
 
   const env = getEnv();

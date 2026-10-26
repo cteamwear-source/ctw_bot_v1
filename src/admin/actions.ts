@@ -61,9 +61,19 @@ export async function executeOrderConfirm(orderId: string, adminChatId: string):
     return;
   }
 
-  await updateOrderRowStatus(orderId, "Confirmed").catch(async (err) => {
+  try {
+    await updateOrderRowStatus(orderId, "Confirmed");
+  } catch (err) {
     console.error("Failed to update sheet on confirm", err);
-  });
+    // Release the claim so a retry can succeed (CRM must be the source of truth)
+    const redis = getRedis();
+    await redis.del(`admin-action:${orderId}`).catch(() => {});
+    await sendMessage(
+      adminChatId,
+      `⚠️ Order confirmed, but CRM update failed — the claim has been released so you can retry. Please check the sheet manually. Error: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
   await sendMessage(adminChatId, `Confirmed ✅ Code verified. Order ${orderId} marked as confirmed.`);
 
   // Notify all OTHER admins that this order is now settled.
@@ -110,9 +120,19 @@ export async function executeOrderIssue(orderId: string, adminChatId: string): P
     return;
   }
 
-  await updateOrderRowStatus(orderId, "Payment Issue").catch((err) => {
+  try {
+    await updateOrderRowStatus(orderId, "Payment Issue");
+  } catch (err) {
     console.error("Failed to update sheet on issue", err);
-  });
+    // Release the claim so a retry can succeed
+    const redis = getRedis();
+    await redis.del(`admin-action:${orderId}`).catch(() => {});
+    await sendMessage(
+      adminChatId,
+      `⚠️ Payment Issue flagged, but CRM update failed — the claim has been released so you can retry. Please check the sheet manually. Error: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
   await sendMessage(adminChatId, `Marked as Payment Issue 🚩 for ${orderId}`);
 }
 
