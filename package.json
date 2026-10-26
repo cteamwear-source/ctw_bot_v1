@@ -18,7 +18,8 @@
     "webhook-info": "tsx scripts/webhook-info.ts",
     "generate-catalog": "tsx scripts/generate-catalog.ts",
     "test-admin-trigger": "tsx scripts/test-admin-trigger.ts",
-    "mockup-ui": "tsx scripts/mockup-ui-server.ts"
+    "mockup-ui": "tsx scripts/mockup-ui-server.ts",
+    "latency-probe": "tsx scripts/latency-probe.ts"
   },
   "dependencies": {
     "@sentry/node": "10.71.0",

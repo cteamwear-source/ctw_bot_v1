@@ -117,6 +117,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     buildStampLogged = true;
   }
 
+  // Uptime-pinger warm-up: keeps an instance warm, touches no Redis/Meta/env.
+  if (req.method === "GET" && req.query?.["warm"] === "1") {
+    res.status(204).end();
+    return;
+  }
+
   // Meta Webhook Verification (GET request) — standard handshake.
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];

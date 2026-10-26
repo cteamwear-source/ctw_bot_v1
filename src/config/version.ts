@@ -13,7 +13,7 @@
  * endpoint and to log.
  */
 
-export const BUILD_STAMP = "2026-10-26-security-hardening";
+export const BUILD_STAMP = "2026-10-27-perf-fast-replies";
 
 export interface BuildInfo {
   buildStamp: string;

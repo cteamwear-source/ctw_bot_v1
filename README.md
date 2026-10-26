@@ -143,6 +143,28 @@ deployment is stale — commit + push the current code and redeploy. The
 webhook also logs the same `buildStamp`/`commitSha` once per cold start
 (visible in `vercel logs`).
 
+### 5b. Speed setup (region, warm pinger, latency probe)
+
+The bot (WhatsApp via `META_API_BASE_URL`, e.g. Emovur) answers static
+messages in under a second when it runs next to its Redis:
+
+1. **Region:** `vercel.json` pins functions to `bom1` (Mumbai). Keep Upstash
+   Redis in Mumbai too. In Vercel → Settings → Functions, confirm **Fluid
+   compute is ON** (Hobby needs it for the 120s `api/mockup-delivery` worker).
+2. **Warm pinger:** create a free [UptimeRobot](https://uptimerobot.com) or
+   [cron-job.org](https://cron-job.org) monitor that GETs
+   `https://<your-app>/api/webhook?warm=1` **every 5 minutes**. It returns
+   `204` and touches no Redis and no WhatsApp API, so it only keeps an
+   instance warm.
+3. **Latency probe:** `npm run latency-probe` times 10 lightweight Graph calls
+   through `META_API_BASE_URL` and prints p50/p95. Add `--compare` to also
+   time `graph.facebook.com` directly, and a number to change the count
+   (`npm run latency-probe -- 20 --compare`). It reads `.env.local` / `.env`
+   and prints only hosts, status codes and timings, never tokens or ids.
+
+Every message logs one `[timing]` line (`redisMs`, `sendMs`, `totalMs`,
+`cold`) in `vercel logs` for checking the real numbers.
+
 ## 6. Test it on Telegram
 
 1. Open your dev bot in Telegram (search its @username, or use the link

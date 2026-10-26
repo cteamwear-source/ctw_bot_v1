@@ -12,7 +12,7 @@ Status: in progress. Tick each box when its task is merged and `npm test` + `npm
 - [x] **T6** Faster quote/payment; customer reply first, Sheets + admin notify in parallel after
 - [x] **T7** AI mockup only in the worker; quote/QR sent at once; 3 free per month then ₹20 paid flow
 - [x] **T8** Every failure gets a customer reply; timeouts on Sheets
-- [ ] **T9** `regions: ["bom1"]`, warm endpoint for uptime pinger, latency probe script, docs + `BUILD_STAMP`
+- [x] **T9** `regions: ["bom1"]`, warm endpoint for uptime pinger, latency probe script, docs + `BUILD_STAMP`
 
 ## Goal
 

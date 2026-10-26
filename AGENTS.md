@@ -55,7 +55,8 @@ These are the rules of the codebase. Violating them is a bug.
 
 ```
 api/
-  webhook.ts            WhatsApp webhook entry (secret check, dedupe, fast 200-ACK, API timeouts)
+  webhook.ts            WhatsApp webhook entry: HMAC check, 200 right after parse, processing in
+                        waitUntil (chats in parallel, in order per chat); GET ?warm=1 -> 204 (pinger)
   mockup-delivery.ts    Internal-only 202+waitUntil worker for slow mockup generation (x-internal-secret)
   heartbeat.ts          Daily cron -> admin ping
   health.ts             Public build/feature info (deploy-lag diagnosis; non-secret)
@@ -72,15 +73,16 @@ src/
                         generateAi/imageProvider/{gemini,openai}Client, promptBuilder, generate (legacy)
   pricing/              priceBook.ts (data) + index.ts (pure math)
   qr/                   UPI URI + 512px PNG generation
-  session/              redisClient, redisStorageAdapter, chatLock, dedupe, draftStore,
-                        orderId, orderStore, rateLimit, statusMachine
-  shared/               types.ts (OrderData etc.), render.ts, sanitize.ts
+  session/              redisClient, hotPath (begin/finish/abort pipelines: dedupe, lock, rate
+                        limit, draft), draftStore, orderId, orderStore, statusMachine
+  shared/               types.ts (OrderData etc.), render.ts, sanitize.ts, timing.ts,
+                        withTimeout.ts, customerNotified.ts
   sheets/               client (Orders tab), safeAppend, catalogSchema/Selections,
                         mockupSchema/Generations — 3 tabs: Orders, CatalogSelections, MockupGenerations
   storage/              blob.ts (Vercel Blob wrapper, injectable uploader)
 assets/catalog/         Generated catalog preview images — COMMITTED, shipped via includeFiles
 quality/                Source catalog PDFs — input to generate-catalog
-scripts/                set-webhook, delete-webhook, webhook-info, generate-catalog
+scripts/                set-webhook, delete-webhook, webhook-info, generate-catalog, latency-probe
 tests/                  Node test-runner suites + support/ fakes (fakeRedis, fakeSheetStore, testEnv)
 ```
 
@@ -127,12 +129,16 @@ no-payment cancel → "Lead — No Payment".
 - **Paid flow (`paidGeneration.ts`):** proof screenshot routed via the top-level
   `bot.on("message")` → admins get approve/reject buttons (`mockupgen:` callbacks,
   idempotent, admin-gated).
-  far beyond standard webhook timeout budgets — it is dispatched fire-and-forget to
-  `POST /api/mockup-delivery` (120s maxDuration, `waitUntil`), protected by
-  `x-internal-secret` with timing-safe compare. Both triggers call it: the
+- **Worker only:** AI generation runs far beyond webhook budgets, so it ONLY runs in
+  `POST /api/mockup-delivery` (120s maxDuration, `waitUntil`, outer catch → admin
+  alert), protected by `x-internal-secret` with timing-safe compare. The webhook
+  waits only for the 202 (3s timeout). Every generation goes through
+  `startMockupGeneration` (quota applies). On "Generate" the customer gets
+  `COPY.mockupGeneratingNote` + `COPY.mockupArrivingShortly`, then the quote/QR/pay
+  messages immediately; the mockup arrives later. Both triggers dispatch: the
   order-flow mockup step and the admin paid-approval. **Never run slow
   generation inside the webhook handler** — `tests/mockupTiming.test.ts`
-  enforces this structurally. The paid-approval delivery seam is injectable
+  enforces this behaviourally. The paid-approval delivery seam is injectable
   (`__setAfterApprovalDeliverForTests`) for tests.
 - **Over-quota UX:** when the free quota is exhausted, `api/mockup-delivery.ts`
   itself messages the customer (`COPY.mockupPaidRequired`) and the admins; the
@@ -146,10 +152,10 @@ no-payment cancel → "Lead — No Payment".
 
 | Key | TTL | Purpose |
 |---|---|---|
-| `upd:<updateId>` | 24h | webhook dedupe (SETNX) |
-| `busy:<chatId>` | 90s | per-chat concurrency lock |
-| `outer-sess:*`, `conv:*` | 24h | grammY storages |
-| `sess:<chatId>` | 24h | order draft |
+| `upd:<msgId>` | 24h | webhook dedupe (SET NX in `hotPath.begin`; deleted by `abort` on failure) |
+| `lock:<chatId>` | 30s | per-chat lock, token-owned; released by Lua compare-and-delete in `finish` |
+| `rl:<chatId>:<epochMinute>` | 120s | flood control, 20 msgs/min |
+| `sess:<chatId>` | 24h | order draft (Redis is the source of truth; no memory cache) |
 | `oid:<YYMMDD>` | 48h | order-id counter (INCR → `CTW-YYMMDD-nn`) |
 | `order:<orderId>` | 14d | order snapshot (admin confirm / mockup recovery) |
 | `admin-action:<orderId>` | 90d | admin confirm/issue idempotency |
@@ -161,7 +167,18 @@ Customer chat ids are stored as `"wa:<id>"` prefix strings.
 
 ## Serverless/Vercel gotchas
 
-- **Always 200-ACK the webhook**, even on error (avoid WhatsApp retry storms).
+- **Always 200-ACK the webhook**, even on error (avoid WhatsApp retry storms). The
+  200 goes out right after HMAC + JSON parse; processing runs in `waitUntil`.
+- **Static reply budget:** 1 Redis pipeline before the send (`hotPath.begin`), 1
+  WhatsApp send, 1 pipeline after (`hotPath.finish`). Sheets / admin notify run
+  after the customer send, in parallel. Heavy modules (sharp, google-*, Blob, AI,
+  qrcode, Sentry) are `await import()`ed only where used (`tests/coldStart.test.ts`).
+- **Every failure gets exactly one reply** (`COPY.genericError`); `finish()` always
+  runs, so the lock is always released. Sends: 8s timeout, 1 retry (network/429).
+  Sheets: 10s per attempt.
+- **Region:** `vercel.json` pins `regions: ["bom1"]` (Mumbai, next to Upstash).
+  Fluid compute must be ON (Hobby needs it for the 120s worker).
+  `GET /api/webhook?warm=1` → 204 with no Redis/Meta calls, for an uptime pinger.
 - `api/webhook.ts` needs `includeFiles: "assets/catalog/**"` in `vercel.json` —
   catalog images are read from disk at runtime, not bundled by tracing.
 - `catalog.generated.json` is read with `fs.readFileSync` — tsconfig module settings
@@ -182,6 +199,7 @@ npm test                 # node --import tsx --test tests/**/*.test.ts
 npm run dev              # vercel dev
 npm run generate-catalog # re-ingest quality/*.pdf -> assets/catalog + catalog.generated.json
 npm run set-webhook / delete-webhook / webhook-info
+npm run latency-probe -- [N] [--compare]  # p50/p95 of Graph calls via META_API_BASE_URL (never prints secrets)
 ```
 
 ## Catalog data pipeline

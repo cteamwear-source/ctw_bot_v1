@@ -1,9 +1,11 @@
 # Tech Stack
 
 ## Runtime & Hosting
-- **Vercel Serverless Functions** (webhook-only; no long polling).
-- Telegram webhook registered with a `secret_token`; every invocation validates `X-Telegram-Bot-Api-Secret-Token` (mismatch → 401).
-- Fast-ACK pattern: respond 200 immediately, deduplicate on `update_id` (`upd:<update_id>`), and serialize per chat using Redis locks (`lock:<chat_id>`).
+- **Vercel Serverless Functions** (webhook-only; no long polling), region `bom1` (Mumbai), Fluid compute ON.
+- Channel is **WhatsApp** (Meta Cloud API via `META_API_BASE_URL`, e.g. Emovur), not Telegram. POSTs are verified with `X-Hub-Signature-256` HMAC when `META_APP_SECRET` is set (mismatch → 401).
+- Fast 200: respond right after HMAC + JSON parse, process inside `waitUntil`. One Redis pipeline before the send (`hotPath.begin`: dedupe `upd:<msgId>`, token lock `lock:<chatId>`, flood control `rl:<chatId>:<minute>`, draft `sess:<chatId>`) and one after (`hotPath.finish`: save draft + release lock).
+- AI mockups run only in `api/mockup-delivery` (worker); the webhook waits only for its 202.
+- `GET /api/webhook?warm=1` → 204 (no Redis/Meta) for an uptime pinger.
 
 ## Core Libraries
 | Purpose | Library |
@@ -23,12 +25,12 @@
 
 ## Data Stores
 - **Upstash Redis**:
-  - `sess:<chat_id>`: conversation session state (24h TTL).
-  - `draft:<chat_id>`: transient order builder (24h TTL).
+  - `sess:<chat_id>`: order draft (24h TTL; Redis is the source of truth).
   - `order:<order_id>`: immutable order snapshot.
-  - `oid:YYMMDD`: daily atomic order-ID sequence (`INCR`).
-  - `upd:<update_id>`: webhook deduplication marker (24h TTL).
-  - `lock:<chat_id>`: distributed concurrency lock (15s TTL).
+  - `oid:YYMMDD`: daily atomic order-ID sequence (`INCR` + `EXPIRE` in one pipeline).
+  - `upd:<msg_id>`: webhook deduplication marker (24h TTL; deleted on failure).
+  - `lock:<chat_id>`: token-owned per-chat lock (30s TTL).
+  - `rl:<chat_id>:<epoch_minute>`: flood control, 20 msgs/min (120s TTL).
   - `mockup:quota:<chat_id>:<YYYY-MM>`: monthly mockup quota counter (Asia/Kolkata).
 - **Google Sheets**:
   - `Orders` tab: CRM master ledger.
@@ -46,9 +48,10 @@
 - Register webhook: `npm run set-webhook -- <deployment-url>`
 - Inspect webhook status: `npm run webhook-info`
 - Regenerate catalog from PDFs: `npm run generate-catalog`
+- Measure WhatsApp API latency: `npm run latency-probe -- [N] [--compare]`
 
 ## Security Requirements
-- Webhook secret enforced on 100% of Telegram requests.
+- Webhook signature (`X-Hub-Signature-256`) checked on every POST when `META_APP_SECRET` is set.
 - All monetary values computed server-side in `src/pricing/`.
 - Admin-only actions strictly gated by `chat_id ∈ ADMIN_CHAT_IDS` checked server-side.
 - Formula-injection sanitizer (`sanitizeForSpreadsheet`) on every sheet-bound string.
