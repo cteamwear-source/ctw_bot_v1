@@ -23,6 +23,8 @@ function guessMimeType(buffer: Buffer): string {
   if (buffer.length > 8 && buffer[0] === 0x89 && buffer[1] === 0x50) return "image/png";
   // JPEG signature
   if (buffer.length > 3 && buffer[0] === 0xff && buffer[1] === 0xd8) return "image/jpeg";
+  // WebP signature
+  if (buffer.length > 12 && buffer.toString("ascii", 8, 12) === "WEBP") return "image/webp";
   return "image/png";
 }
 
@@ -47,51 +49,65 @@ export async function generateGeminiMockup(
     },
   }));
 
-  const url = `${GEMINI_BASE_URL}/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+  // Use header for API key (not URL query string) to avoid key leakage in logs
+  const url = `${GEMINI_BASE_URL}/${model}:generateContent`;
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: input.prompt }, ...imageParts],
-        },
-      ],
-      generationConfig: {
-        responseModalities: ["IMAGE"],
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout to fit in 120s delivery budget
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": env.GEMINI_API_KEY,
       },
-    }),
-  });
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: input.prompt }, ...imageParts],
+          },
+        ],
+        generationConfig: {
+          responseModalities: ["IMAGE"],
+        },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
 
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "<no body>");
-    throw new Error(`Gemini image request failed (${response.status}): ${bodyText}`);
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => "<no body>");
+      throw new Error(`Gemini image request failed (${response.status}): ${bodyText}`);
+    }
+
+    const result = (await response.json()) as {
+      candidates?: {
+        content?: { parts?: { inlineData?: { data?: string; mimeType?: string } }[] };
+        finishReason?: string;
+      }[];
+      promptFeedback?: { blockReason?: string };
+    };
+
+    if (result.promptFeedback?.blockReason) {
+      throw new Error(`Gemini blocked the request: ${result.promptFeedback.blockReason}`);
+    }
+
+    const parts = result.candidates?.[0]?.content?.parts ?? [];
+    const imagePart = parts.find((p) => p.inlineData?.data);
+    if (!imagePart?.inlineData?.data) {
+      const finishReason = result.candidates?.[0]?.finishReason ?? "unknown";
+      throw new Error(`Gemini response did not contain image data (finishReason: ${finishReason}).`);
+    }
+
+    return {
+      imageBuffer: Buffer.from(imagePart.inlineData.data, "base64"),
+      costUsd: 0, // free tier; no per-request cost reported by the API
+      model,
+    };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
   }
-
-  const result = (await response.json()) as {
-    candidates?: {
-      content?: { parts?: { inlineData?: { data?: string; mimeType?: string } }[] };
-      finishReason?: string;
-    }[];
-    promptFeedback?: { blockReason?: string };
-  };
-
-  if (result.promptFeedback?.blockReason) {
-    throw new Error(`Gemini blocked the request: ${result.promptFeedback.blockReason}`);
-  }
-
-  const parts = result.candidates?.[0]?.content?.parts ?? [];
-  const imagePart = parts.find((p) => p.inlineData?.data);
-  if (!imagePart?.inlineData?.data) {
-    const finishReason = result.candidates?.[0]?.finishReason ?? "unknown";
-    throw new Error(`Gemini response did not contain image data (finishReason: ${finishReason}).`);
-  }
-
-  return {
-    imageBuffer: Buffer.from(imagePart.inlineData.data, "base64"),
-    costUsd: 0, // free tier; no per-request cost reported by the API
-    model,
-  };
 }
