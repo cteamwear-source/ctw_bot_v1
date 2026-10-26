@@ -103,9 +103,11 @@ test("selecting 'order:catalogs' sends the complete catalog list with Drive link
 test("querying specific brand keyword sends that catalog's direct link", async () => {
   await handleWhatsAppMessage(CHAT, textMsg("adidas"));
 
-  const brandMsg = sentMessages.find((m) => m.text?.body?.includes("Adidas Catalogue"));
-  assert.ok(brandMsg, "must return Adidas catalog details");
-  assert.ok(brandMsg.text?.body.includes("https://drive.google.com/file/d/"));
+  // T4: the catalog link is merged into the order-type menu body (1 send).
+  assert.equal(sentMessages.length, 1);
+  const body: string | undefined = sentMessages[0]?.interactive?.body?.text;
+  assert.ok(body?.includes("Adidas Catalogue"), "must return Adidas catalog details");
+  assert.ok(body?.includes("https://drive.google.com/file/d/"));
 });
 
 test("bulk order walks through the complete workflow to payment", async () => {

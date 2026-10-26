@@ -1,4 +1,4 @@
-import { sendInteractiveButtons, sendInteractiveList, sendMessage } from '../whatsapp/metaClient.js';
+import { isMetaValidationError, sendInteractiveButtons, sendInteractiveList, sendMessage } from '../whatsapp/metaClient.js';
 
 export interface MenuOption {
   id: string;
@@ -43,7 +43,11 @@ export async function sendMenu(
       return await sendInteractiveList(to, text, listButtonText, [{ rows }], effectiveFooter);
     }
   } catch (err) {
-    console.warn(`[uiMapper] sendMenu interactive failed, falling back to plain text menu:`, err);
+    // Only a 4xx rejection proves the interactive message was NOT delivered.
+    // A timeout/network failure may have been delivered, so falling back
+    // could double-send: let the error propagate instead.
+    if (!isMetaValidationError(err)) throw err;
+    console.warn(`[uiMapper] sendMenu interactive rejected, falling back to plain text menu:`, err);
     const menuLines = options.map((o, idx) => `${idx + 1}. ${o.title}`);
     const footerHint = effectiveFooter ? `\n\n_(${effectiveFooter})_` : "\n\n_(Reply with option number or title)_";
     const fallbackText = `${text}\n\n${menuLines.join("\n")}${footerHint}`;

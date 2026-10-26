@@ -86,8 +86,7 @@ export async function handleWhatsAppMessage(chatId: string, message: any) {
     // Any other button or text resumes order:
     draft.confirmingCancel = false;
     await saveDraft(chatId, draft);
-    await sendMessage(chatId, "▶️ Order resumed! Let's continue:");
-    await promptNext(chatId, draft, false);
+    await promptNext(chatId, draft, false, "▶️ Order resumed! Let's continue:");
     return;
   }
 
@@ -144,8 +143,7 @@ export async function handleWhatsAppMessage(chatId: string, message: any) {
 
     const rolledBack = rollbackStep(draft);
     if (!rolledBack) {
-      await sendMessage(chatId, "You're already at the beginning of the order flow! 👇");
-      await promptNext(chatId, draft, false);
+      await promptNext(chatId, draft, false, "You're already at the beginning of the order flow! 👇");
       return;
     }
     await saveDraft(chatId, draft);
@@ -168,8 +166,7 @@ export async function handleWhatsAppMessage(chatId: string, message: any) {
     lowerInput === "catalog:download"
   ) {
     setTimingStep("catalog");
-    await sendMessage(chatId, COPY.catalogsListMessage);
-    await promptNext(chatId, draft, false);
+    await promptNext(chatId, draft, false, COPY.catalogsListMessage);
     return;
   }
 
@@ -384,18 +381,18 @@ async function processStep(ctx: WhatsAppContext, draft: OrderDraft, step: string
         lowerOrderType.includes("download") ||
         lowerOrderType === "3"
       ) {
-        await sendMessage(chatId, COPY.catalogsListMessage);
-        await promptNext(chatId, draft, false);
+        await promptNext(chatId, draft, false, COPY.catalogsListMessage);
       } else {
         const specificCatalog = findCatalogByQuery(lowerOrderType);
         if (specificCatalog) {
-          await sendMessage(
+          await promptNext(
             chatId,
+            draft,
+            false,
             `📄 *${specificCatalog.name} (${specificCatalog.tier} Tier)*\n\n` +
             `Tap the link below to view/download:\n🔗 ${specificCatalog.viewUrl}\n\n` +
             `📂 All Catalogs Folder:\n${CATALOG_DRIVE_FOLDER_URL}`
           );
-          await promptNext(chatId, draft, false);
           break;
         }
 
@@ -782,70 +779,83 @@ async function processStep(ctx: WhatsAppContext, draft: OrderDraft, step: string
   }
 }
 
-async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false) {
+/** WhatsApp interactive body limit; a longer merged body is split into 2 sends. */
+const MAX_MENU_BODY = 1024;
+
+/**
+ * Send the screen for the draft's current step. `isReprompt` and `prefix`
+ * (e.g. "▶️ Order resumed!…") are merged into the screen's body so a static
+ * screen costs exactly one send.
+ */
+async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false, prefix?: string) {
   const step = determineStep(draft);
-  if (isReprompt) {
-     await sendMessage(chatId, COPY.genericReprompt);
-  }
+  const head = [prefix, isReprompt ? COPY.genericReprompt : undefined].filter(Boolean).join("\n\n");
+  const withHead = async (text: string): Promise<string> => {
+    if (!head) return text;
+    const merged = `${head}\n\n${text}`;
+    if (merged.length <= MAX_MENU_BODY) return merged;
+    await sendMessage(chatId, head);
+    return text;
+  };
 
   switch (step) {
     case "orderType":
-      await sendMenu(chatId, COPY.greetingAsk, [
+      await sendMenu(chatId, await withHead(COPY.greetingAsk), [
         { id: "order:bulk", title: "Bulk Order (50+)" },
         { id: "order:sample", title: "Order Sample Kit" },
         { id: "order:catalogs", title: COPY.catalogsMenuTitle }
       ]);
       break;
     case "garmentSilhouette":
-      await sendMenu(chatId, COPY.garmentSilhouetteAsk, [
+      await sendMenu(chatId, await withHead(COPY.garmentSilhouetteAsk), [
         { id: "garment:collar", title: "Collared Neck" },
         { id: "garment:round_neck", title: "Round Neck" },
         { id: "nav:back", title: "⬅️ Back" }
       ]);
       break;
     case "sampleFabric":
-      await sendMenu(chatId, COPY.sampleKitFabricAsk, [
+      await sendMenu(chatId, await withHead(COPY.sampleKitFabricAsk), [
         { id: "fabric:polyester", title: "Dry Fit" },
         { id: "fabric:cotton", title: "100% Cotton" },
         { id: "nav:back", title: "⬅️ Back" }
       ]);
       break;
     case "qty":
-      await sendMenu(chatId, COPY.qtyAsk, [
+      await sendMenu(chatId, await withHead(COPY.qtyAsk), [
         { id: "nav:back", title: "⬅️ Back" }
       ]);
       break;
     case "city":
-      await sendMenu(chatId, COPY.cityAsk, [
+      await sendMenu(chatId, await withHead(COPY.cityAsk), [
         { id: "nav:back", title: "⬅️ Back" }
       ]);
       break;
     case "name":
-      await sendMenu(chatId, COPY.nameAsk, [
+      await sendMenu(chatId, await withHead(COPY.nameAsk), [
         { id: "nav:back", title: "⬅️ Back" }
       ]);
       break;
     case "phone":
-      await sendMenu(chatId, COPY.phoneAsk, [
+      await sendMenu(chatId, await withHead(COPY.phoneAsk), [
         { id: "nav:back", title: "⬅️ Back" }
       ]);
       break;
     case "timeline":
-      await sendMenu(chatId, COPY.timelineAsk, [
+      await sendMenu(chatId, await withHead(COPY.timelineAsk), [
         { id: "timeline:urgent", title: "Urgent (1-2 days)" },
         { id: "timeline:standard", title: "Standard (3-4 days)" },
         { id: "timeline:flexible", title: "Flexible (6-7 days)" }
       ]);
       break;
     case "tier":
-      await sendMenu(chatId, COPY.welcome, [
+      await sendMenu(chatId, await withHead(COPY.welcome), [
         { id: "tier:basic", title: "Basic" },
         { id: "tier:standard", title: "Standard" },
         { id: "tier:premium", title: "Premium" }
       ]);
       break;
     case "catalogFabric":
-      await sendMenu(chatId, COPY.fabricAsk, [
+      await sendMenu(chatId, await withHead(COPY.fabricAsk), [
         { id: "fabric:polyester", title: "Dry Fit" },
         { id: "fabric:cotton", title: "100% Cotton" },
         { id: "nav:back", title: "⬅️ Back" }
@@ -857,7 +867,7 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false)
         draft.qualityOptionId = qualities[0]?.id ?? "standard";
         draft.qualityOptionName = qualities[0]?.name ?? "Standard Quality";
         await saveDraft(chatId, draft);
-        await promptNext(chatId, draft);
+        await promptNext(chatId, draft, isReprompt, prefix);
       } else {
         const qualityMenuOptions = qualities.map((q) => ({ id: `optquality:${q.id}`, title: q.name }));
         if (qualityMenuOptions.length < 10) {
@@ -865,7 +875,7 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false)
         }
         await sendMenu(
           chatId, 
-          COPY.catalogQualityAsk, 
+          await withHead(COPY.catalogQualityAsk), 
           qualityMenuOptions
         );
       }
@@ -890,7 +900,7 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false)
           mockupEligible: true,
         };
         await saveDraft(chatId, draft);
-        await promptNext(chatId, draft);
+        await promptNext(chatId, draft, isReprompt, prefix);
       } else {
         const colorMenuOptions = quality.colors.map((c) => ({ id: `color:${c}`, title: c }));
         if (colorMenuOptions.length < 10) {
@@ -898,20 +908,20 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false)
         }
         await sendMenu(
           chatId,
-          "Now choose your T-shirt colour:",
+          await withHead("Now choose your T-shirt colour:"),
           colorMenuOptions
         );
       }
       break;
     case "printMethod":
-      await sendMenu(chatId, COPY.brandingTypeAsk, [
+      await sendMenu(chatId, await withHead(COPY.brandingTypeAsk), [
         { id: "branding:print", title: "Print (Screen/DTF)" },
         { id: "branding:embroidery", title: "Embroidery" },
         { id: "nav:back", title: "⬅️ Back" }
       ]);
       break;
     case "logoPlacement":
-      await sendMenu(chatId, COPY.placementAsk, [
+      await sendMenu(chatId, await withHead(COPY.placementAsk), [
         { id: "placement:left_chest", title: "Left Chest" },
         { id: "placement:center_front", title: "Centre Front" },
         { id: "placement:upper_back", title: "Back Centre" },
@@ -922,12 +932,12 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false)
       ], "View Placements");
       break;
     case "logoUpload":
-      await sendMenu(chatId, COPY.logoUploadPrompt, [
+      await sendMenu(chatId, await withHead(COPY.logoUploadPrompt), [
         { id: "nav:back", title: "⬅️ Back" }
       ]);
       break;
     case "logoMore":
-      await sendMenu(chatId, COPY.addAnotherLogoAsk(draft.logos!.length), [
+      await sendMenu(chatId, await withHead(COPY.addAnotherLogoAsk(draft.logos!.length)), [
         { id: "logo:more", title: "Add another logo" },
         { id: "logo:done", title: "No more, continue" },
         { id: "nav:back", title: "⬅️ Back" }
@@ -940,7 +950,7 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false)
         `📎 Got your logo! Want to see a **preview mockup** of it on your exact selected T-Shirt now?\n\n` +
         `You have **${remaining} free mockup preview${remaining === 1 ? "" : "s"}** available this month.\n\n` +
         `Choose an option below:`;
-      await sendMenu(chatId, promptText, [
+      await sendMenu(chatId, await withHead(promptText), [
         { id: "mockup:generate", title: "Generate my mockup" },
         { id: "mockup:skip", title: "Skip - go to quote" },
         { id: "nav:back", title: "⬅️ Back" }
@@ -1000,7 +1010,7 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false)
       await saveOrderSnapshot(order).catch(() => {});
 
       // ---- S11 Payment ----
-      const quoteText = renderQuoteCard(order);
+      const quoteText = await withHead(renderQuoteCard(order));
       const env = getEnv();
       await sendMessage(chatId, quoteText).catch((err) => {
         console.error(`[promptNext:payment] Failed to send quoteText:`, err);

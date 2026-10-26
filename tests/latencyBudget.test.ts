@@ -10,8 +10,8 @@
  *    pipeline (dedupe + lock + rate limit + GET sess) and the `finish`
  *    pipeline (SET sess + token-checked unlock).
  *  - tier button press: 1 send.
- *  - unrecognised input at the tier step (reprompt): 2 sends
- *    (COPY.genericReprompt, then the menu) until T4 merges them.
+ *  - unrecognised input at the tier step (reprompt): 1 send
+ *    (COPY.genericReprompt merged into the menu body, T4).
  */
 
 import "./support/testEnv.js";
@@ -125,15 +125,14 @@ test("budget: second message on a warm instance still = exactly 2 Redis round-tr
   assert.equal(sends.length, 2);
 });
 
-test("budget: reprompt at the tier step = exactly 2 Redis round-trips, 2 sends", async () => {
+test("budget: reprompt at the tier step = exactly 2 Redis round-trips, 1 send", async () => {
   await seedDraft(draftAtTierStep());
 
   await handleMessage(CHAT, textMsg("wamid.reprompt0001", "something else"));
 
   assert.equal(redis.roundTrips, 2, "begin + finish (unlock only; nothing saved on reprompt)");
-  assert.equal(sends.length, 2, "COPY.genericReprompt text, then the tier menu");
-  assert.equal(sends[0]!.body.text?.body, COPY.genericReprompt);
-  assert.equal(sends[1]!.body.interactive?.body?.text, COPY.welcome);
+  assert.equal(sends.length, 1, "COPY.genericReprompt merged into the tier menu body");
+  assert.equal(sends[0]!.body.interactive?.body?.text, `${COPY.genericReprompt}\n\n${COPY.welcome}`);
 });
 
 test("timing: exactly one structured line per message with masked msgId and the step", async () => {
@@ -164,7 +163,7 @@ test("timing: second message on the same instance reports cold=false", async () 
   assert.equal(timingLines[1]!.cold, false);
 });
 
-test("baseline: failing sends still record exactly one timing line; 3 attempts, none retried", async () => {
+test("failing sends (400) still record exactly one timing line; 3 attempts, none retried", async () => {
   await seedDraft(draftAtTierStep());
   let attempts = 0;
   __setTransportForTests(async () => {
@@ -174,8 +173,8 @@ test("baseline: failing sends still record exactly one timing line; 3 attempts, 
 
   await handleMessage(CHAT, buttonReply("wamid.fail000001", "tier:standard", "Standard"));
 
-  // Baseline: interactive menu (400) → sendMenu's plain-text fallback (400)
-  // → processStep's generic error message (400). 3 attempts, no retries yet.
+  // Interactive menu (400) → sendMenu's plain-text fallback (400, allowed
+  // for 4xx) → processStep's generic error message (400). 400 is never retried.
   assert.equal(attempts, 3);
   assert.equal(timingLines.length, 1);
 });

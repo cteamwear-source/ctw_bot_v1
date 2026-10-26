@@ -24,41 +24,110 @@ export function __setTransportForTests(fn: MetaTransport | undefined): void {
  * verbatim. The version segment (/v20.0) is folded into META_API_BASE_URL so
  * a BSP can supply its own routing surface without code changes.
  */
+const DEFAULT_SEND_TIMEOUT_MS = 8000;
+const RETRY_BACKOFF_MS = 300;
+let sendTimeoutMs = DEFAULT_SEND_TIMEOUT_MS;
+
+/** Test seam: shorten the per-attempt send timeout (undefined restores 8s). */
+export function __setSendTimeoutMsForTests(ms: number | undefined): void {
+  sendTimeoutMs = ms ?? DEFAULT_SEND_TIMEOUT_MS;
+}
+
+/** Non-2xx response from the Cloud API. `status` lets callers tell 4xx from 5xx. */
+export class MetaApiError extends Error {
+  constructor(readonly status: number, body: string) {
+    super(`Meta API error ${status}: ${body}`);
+    this.name = "MetaApiError";
+  }
+}
+
+/** The send did not complete (headers + body) within the timeout. Never retried: it may have been delivered. */
+export class MetaTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Meta API send timed out after ${ms}ms`);
+    this.name = "MetaTimeoutError";
+  }
+}
+
+/** 4xx other than 429: the request itself was rejected (e.g. invalid interactive payload). */
+export function isMetaValidationError(err: unknown): boolean {
+  return err instanceof MetaApiError && err.status >= 400 && err.status < 500 && err.status !== 429;
+}
+
+/** One attempt: request + body read under a single timeout. */
+async function attemptOnce(url: string, init: RequestInit): Promise<{ status: number; ok: boolean; text: string }> {
+  const controller = new AbortController();
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort();
+      reject(new MetaTimeoutError(sendTimeoutMs));
+    }, sendTimeoutMs);
+  });
+  try {
+    return await Promise.race([
+      (async () => {
+        const res = await transport(url, { ...init, signal: controller.signal });
+        const text = await res.text();
+        return { status: res.status, ok: res.ok, text };
+      })(),
+      timedOut,
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function metaFetch(path: string, body: Record<string, unknown>): Promise<any> {
   const env = getEnv();
   const url = `${env.META_API_BASE_URL}/v20.0/${env.META_PHONE_NUMBER_ID}${path}`;
-  console.log(`[metaClient] calling fetch: ${url}`);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 35000);
+  const init: RequestInit = {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.META_API_TOKEN}`,
+      'Content-Type': 'application/json',
+      ...(env.EMOVUR_CONNECTOR_ID ? { 'collector-id': env.EMOVUR_CONNECTOR_ID, 'connector-id': env.EMOVUR_CONNECTOR_ID } : {})
+    },
+    body: JSON.stringify(body),
+  };
   const startedAt = performance.now();
-  let sendTimed = false;
-  
+  let attempts = 0;
+  let status: number | "timeout" | "network" = "network";
+
   try {
-    const res = await transport(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.META_API_TOKEN}`,
-        'Content-Type': 'application/json',
-        ...(env.EMOVUR_CONNECTOR_ID ? { 'collector-id': env.EMOVUR_CONNECTOR_ID, 'connector-id': env.EMOVUR_CONNECTOR_ID } : {})
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-    const text = await res.text();
-    addSendMs(performance.now() - startedAt);
-    sendTimed = true;
-    console.log(`[metaClient] fetch response status: ${res.status}`);
-    if (!res.ok) {
-      console.error(`[metaClient] ${path} failed ${res.status}: ${text}`);
-      throw new Error(`Meta API error ${res.status}: ${text}`);
+    // At most 2 attempts; only network errors and 429 get the second one.
+    for (;;) {
+      attempts++;
+      let result: { status: number; ok: boolean; text: string };
+      try {
+        result = await attemptOnce(url, init);
+      } catch (err) {
+        if (err instanceof MetaTimeoutError) {
+          status = "timeout";
+          throw err;
+        }
+        status = "network";
+        if (attempts < 2) {
+          await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+          continue;
+        }
+        throw err;
+      }
+      status = result.status;
+      if (result.status === 429 && attempts < 2) {
+        await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+        continue;
+      }
+      if (!result.ok) {
+        console.error(`[metaClient] ${path} failed ${result.status}: ${result.text}`);
+        throw new MetaApiError(result.status, result.text);
+      }
+      try { return JSON.parse(result.text); } catch { return result.text; }
     }
-    try { return JSON.parse(text); } catch { return text; }
-  } catch (err) {
-    clearTimeout(timeoutId);
-    if (!sendTimed) addSendMs(performance.now() - startedAt);
-    console.error(`[metaClient] fetch error:`, err);
-    throw err;
+  } finally {
+    const sendMs = performance.now() - startedAt;
+    addSendMs(sendMs);
+    console.log(`[metaClient] send path=${path} status=${status} attempts=${attempts} sendMs=${Math.round(sendMs)}`);
   }
 }
 
