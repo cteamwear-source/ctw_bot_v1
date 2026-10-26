@@ -26,6 +26,7 @@
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import crypto from "node:crypto";
+import { waitUntil } from "@vercel/functions";
 import { getEnv } from "../src/config/env.js";
 import { BUILD_STAMP } from "../src/config/version.js";
 import { handleMessage } from "../src/bot/index.js";
@@ -180,57 +181,88 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Redacted summary only — no raw headers / body / message contents.
   console.log("[webhook] received", JSON.stringify(summarizePayload(payload)));
 
-  try {
-    let processed = false;
-    // 1. Standard Meta entry payload (also used by Emovur and proxies)
-    if (
-      !processed &&
-      ((payload as any)?.object === "whatsapp_business_account" || Array.isArray((payload as any)?.entry))
-    ) {
-      processed = true;
-      const entries = (payload as any).entry || [];
-      for (const entry of entries) {
-        for (const change of (entry.changes ?? [])) {
-          for (const message of (change.value?.messages ?? [])) {
-            // Dedupe (upd:<id>) happens inside handleMessage via hotPath.begin.
-            const from = String(message.from || "");
-            if (!from) continue;
+  const { messages, recognised } = collectMessages(payload);
+  if (!recognised) {
+    console.warn("[webhook] unrecognised payload shape", {
+      type: typeof payload,
+      keys: payload && typeof payload === "object" ? Object.keys(payload as object) : null,
+    });
+  }
 
-            const chatId = `wa:${from}`;
-            console.log(`[webhook] calling handleMessage for ${chatId}`);
-            await handleMessage(chatId, message);
-            console.log(`[webhook] handleMessage completed for ${chatId}`);
-          }
+  // Fast 200: Meta gets its ACK now; processing continues inside waitUntil.
+  // Statuses-only payloads (delivered/read receipts) schedule nothing.
+  res.status(200).send("EVENT_RECEIVED");
+  if (messages.length === 0) return;
+  waitUntilImpl(processBatch(messages));
+}
+
+interface InboundMessage {
+  chatId: string;
+  message: any;
+}
+
+/** Collect customer messages from both supported payload shapes. */
+function collectMessages(payload: unknown): { messages: InboundMessage[]; recognised: boolean } {
+  const p = payload as any;
+  const raw: any[] = [];
+  let recognised = false;
+  // 1. Standard Meta entry payload (also used by Emovur and proxies)
+  if (p?.object === "whatsapp_business_account" || Array.isArray(p?.entry)) {
+    recognised = true;
+    for (const entry of p.entry ?? []) {
+      for (const change of entry?.changes ?? []) {
+        for (const message of change?.value?.messages ?? []) raw.push(message);
+      }
+    }
+  } else if (Array.isArray(p?.messages)) {
+    // 2. Direct messages array fallback
+    recognised = true;
+    raw.push(...p.messages);
+  }
+  const messages: InboundMessage[] = [];
+  for (const message of raw) {
+    // Dedupe (upd:<id>) happens inside handleMessage via hotPath.begin.
+    const from = String(message?.from || "");
+    if (!from) continue;
+    messages.push({ chatId: `wa:${from}`, message });
+  }
+  return { messages, recognised };
+}
+
+/** Chats in parallel; messages within one chat strictly in order. */
+async function processBatch(messages: InboundMessage[]): Promise<void> {
+  const byChat = new Map<string, any[]>();
+  for (const { chatId, message } of messages) {
+    const list = byChat.get(chatId) ?? [];
+    list.push(message);
+    byChat.set(chatId, list);
+  }
+  await Promise.allSettled(
+    [...byChat].map(async ([chatId, chatMessages]) => {
+      for (const message of chatMessages) {
+        try {
+          await handleMessageImpl(chatId, message);
+        } catch (err) {
+          console.error(`[webhook] error processing message for ${maskPhone(chatId.slice(3))}:`, err);
         }
       }
-    }
+    }),
+  );
+}
 
-    // 2. Direct messages array fallback
-    if (!processed && Array.isArray((payload as any)?.messages)) {
-      processed = true;
-      for (const message of (payload as any).messages) {
-        const from = String(message.from || "");
-        if (!from) continue;
-        await handleMessage(`wa:${from}`, message);
-      }
-    }
+let waitUntilImpl: (p: Promise<unknown>) => void = waitUntil;
+let handleMessageImpl: (chatId: string, message: any) => Promise<unknown> = handleMessage;
 
-    if (!processed) {
-      console.warn("[webhook] unrecognised payload shape", {
-        type: typeof payload,
-        keys: payload && typeof payload === "object" ? Object.keys(payload as object) : null,
-      });
-    }
+/** Test seam: capture background work instead of Vercel's waitUntil. */
+export function __setWaitUntilForTests(fn: ((p: Promise<unknown>) => void) | undefined): void {
+  waitUntilImpl = fn ?? waitUntil;
+}
 
-    // Acknowledge 200 AFTER execution completes so Vercel does not freeze the container
-    res.status(200).send("EVENT_RECEIVED");
-  } catch (err) {
-    console.error("[webhook] error processing message:", err);
-    // Still return 200 to Meta / Emovur so they don't endlessly retry failing messages.
-    if (!res.headersSent) {
-      res.status(200).send("EVENT_RECEIVED");
-    }
-  }
+/** Test seam: stub the per-message handler. */
+export function __setHandleMessageForTests(
+  fn: ((chatId: string, message: any) => Promise<unknown>) | undefined,
+): void {
+  handleMessageImpl = fn ?? handleMessage;
 }
 
 /** Meta webhook payloads are a few KB; anything this large is abuse. */

@@ -6,7 +6,7 @@ Status: in progress. Tick each box when its task is merged and `npm test` + `npm
 
 - [x] **T1** Latency tracing and test harness (timing logs, injectable transport, fakeRedis pipeline, `/api/health` host field)
 - [x] **T2** Redis hot path: cross-instance dedupe, lock, rate limit and draft load in 1 pipeline; save + unlock in 1 pipeline
-- [ ] **T3** Fast 200 with `waitUntil`; per-chat batching; skip statuses-only payloads
+- [x] **T3** Fast 200 with `waitUntil`; per-chat batching; skip statuses-only payloads
 - [ ] **T4** One send per static screen; 8s send timeout + 1 retry; safer menu fallback
 - [ ] **T5** Lazy-load heavy modules (sharp, Sheets, Blob, AI, qrcode, Sentry); cold-start test
 - [ ] **T6** Faster quote/payment; customer reply first, Sheets + admin notify in parallel after
