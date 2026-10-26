@@ -17,14 +17,11 @@ import {
 import { resolveProductId, getQualityOptions, getQualityOptionById } from "../catalog/options.js";
 import { findCatalogByQuery, CATALOG_DRIVE_FOLDER_URL } from "../catalog/downloads.js";
 import { nextOrderId } from "../session/orderId.js";
-import { triggerMockupDelivery } from "../mockup/deliverTrigger.js";
-import { peekUsage } from "../mockup/quota.js";
-import { generateUpiQrPng } from "../qr/index.js";
 import { getEnv } from "../config/env.js";
 import { saveOrderSnapshot } from "../session/orderStore.js";
 import { renderQuoteCard } from "../shared/render.js";
-import { safeAppendOrderRow } from "../sheets/safeAppend.js";
-import { notifyAdmins } from "../admin/notify.js";
+// Mockup dispatch, quota, Sheets and admin notify (Blob, google-*) are
+// `await import()`ed only on the steps that use them (T5 cold start).
 import type { ProductId } from "../pricing/priceBook.js";
 import type { OrderData } from "../shared/types.js";
 import { setTimingStep } from "../shared/timing.js";
@@ -725,6 +722,7 @@ async function processStep(ctx: WhatsAppContext, draft: OrderDraft, step: string
         }
 
         // 1. Tell the user how many free mockups they have before generating
+        const { peekUsage } = await import("../mockup/quota.js");
         const usage = await peekUsage(`wa:${chatId}`, { phone: draft.phone }).catch(() => undefined);
         const remaining = usage ? Math.max(0, usage.freeAllowance - usage.committedFreeThisMonth) : 3;
         const freeText = remaining > 0
@@ -736,6 +734,7 @@ async function processStep(ctx: WhatsAppContext, draft: OrderDraft, step: string
         const order = assembleOrderData(chatId, draft);
         await saveOrderSnapshot(order).catch(() => {});
         try {
+          const { triggerMockupDelivery } = await import("../mockup/deliverTrigger.js");
           await triggerMockupDelivery(order.orderId);
         } catch (deliveryErr) {
           console.error(`[mockupDecision] triggerMockupDelivery error for ${order.orderId}:`, deliveryErr);
@@ -944,6 +943,7 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false,
       ]);
       break;
     case "mockupDecision": {
+      const { peekUsage } = await import("../mockup/quota.js");
       const usage = await peekUsage(`wa:${chatId}`, { phone: draft.phone }).catch(() => undefined);
       const remaining = usage ? Math.max(0, usage.freeAllowance - usage.committedFreeThisMonth) : 3;
       const promptText =
@@ -1023,11 +1023,6 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false,
           ? env.STATIC_QR_URL
           : "") ||
         (env.PUBLIC_BASE_URL ? `${env.PUBLIC_BASE_URL}/payment-qr.jpg` : "https://ctwbotv1.vercel.app/payment-qr.jpg");
-
-      // Keep call signature for timing test assertions
-      if (false) {
-        await generateUpiQrPng(env.MERCHANT_VPA, order.advanceDue, order.orderId);
-      }
 
       if (qrUrl) {
         await sendMedia(chatId, qrUrl, "Scan & pay with any UPI app").catch((err) => {
@@ -1117,6 +1112,7 @@ async function completeOrder(chatId: string, draft: OrderDraft) {
   // 2. Safely append to Google Sheets CRM (escalates full text to admin if sheet fails)
   let sheetWriteFailed = false;
   try {
+    const { safeAppendOrderRow } = await import("../sheets/safeAppend.js");
     await safeAppendOrderRow(order);
   } catch (err) {
     console.error(`[completeOrder] Sheet write failed for ${order.orderId}:`, err);
@@ -1126,6 +1122,7 @@ async function completeOrder(chatId: string, draft: OrderDraft) {
   // 3. Trigger admin email alert with 2-step OTP and Web Admin Portal link
   const screenshotIdOrUrl = draft.paymentScreenshotId ?? "";
   try {
+    const { notifyAdmins } = await import("../admin/notify.js");
     await notifyAdmins(order, screenshotIdOrUrl);
   } catch (err) {
     console.error(`[completeOrder] notifyAdmins failed for ${order.orderId}:`, err);

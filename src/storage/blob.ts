@@ -13,7 +13,6 @@
  * real BLOB_READ_WRITE_TOKEN. Production uses @vercel/blob's `put`.
  */
 
-import { put } from "@vercel/blob";
 import { getEnv } from "../config/env.js";
 
 export interface UploadedMockup {
@@ -35,6 +34,8 @@ export interface BlobUploadInput {
 export type BlobUploader = (input: BlobUploadInput) => Promise<UploadedMockup>;
 
 const defaultUploader: BlobUploader = async ({ pathname, data, contentType, token }) => {
+  // Lazy: @vercel/blob is only needed when an upload actually happens.
+  const { put } = await import("@vercel/blob");
   const result = await put(pathname, data, {
     access: "public",
     contentType,

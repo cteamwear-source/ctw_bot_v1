@@ -8,7 +8,7 @@ Status: in progress. Tick each box when its task is merged and `npm test` + `npm
 - [x] **T2** Redis hot path: cross-instance dedupe, lock, rate limit and draft load in 1 pipeline; save + unlock in 1 pipeline
 - [x] **T3** Fast 200 with `waitUntil`; per-chat batching; skip statuses-only payloads
 - [x] **T4** One send per static screen; 8s send timeout + 1 retry; safer menu fallback
-- [ ] **T5** Lazy-load heavy modules (sharp, Sheets, Blob, AI, qrcode, Sentry); cold-start test
+- [x] **T5** Lazy-load heavy modules (sharp, Sheets, Blob, AI, qrcode, Sentry); cold-start test
 - [ ] **T6** Faster quote/payment; customer reply first, Sheets + admin notify in parallel after
 - [ ] **T7** AI mockup only in the worker; quote/QR sent at once; 3 free per month then ₹20 paid flow
 - [ ] **T8** Every failure gets a customer reply; timeouts on Sheets
@@ -146,7 +146,7 @@ Design rules:
 
 | Metric | Before | After |
 |---|---|---|
-| Webhook module import time (local) | | |
+| Webhook module import time (local, tsx, `tests/support/coldStartProbe.ts`) | ~10.6s (10722 / 10569ms) | ~0.4–1.4s (398–1449ms) |
 | Redis round-trips per static step | | |
 | Sends per reprompt | 2 | 1 |
 | Warm static reply, server p95 | | |

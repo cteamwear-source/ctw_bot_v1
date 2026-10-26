@@ -19,21 +19,8 @@ import { verifyAndConsumeApprovalCode } from "./approvalCode.js";
 
 const PROCESSED_TTL_SECONDS = 90 * 24 * 60 * 60; // long enough to safely catch duplicate presses
 
-/** Normalize phone number or chat ID by stripping 'wa:', '+', and leading spaces */
-export function normalizeAdminChatId(chatId: string | undefined): string {
-  if (!chatId) return "";
-  let id = chatId.trim();
-  if (id.startsWith("wa:")) id = id.slice(3);
-  if (id.startsWith("+")) id = id.slice(1);
-  return id;
-}
-
-export function isAuthorizedAdmin(chatId: string | undefined): boolean {
-  if (chatId === undefined) return false;
-  const normalizedIncoming = normalizeAdminChatId(chatId);
-  const configured = getEnv().ADMIN_CHAT_IDS.map(normalizeAdminChatId);
-  return configured.includes(normalizedIncoming);
-}
+import { isAuthorizedAdmin, normalizeAdminChatId } from "./auth.js";
+export { isAuthorizedAdmin, normalizeAdminChatId } from "./auth.js";
 
 export async function markProcessedIfFirst(orderId: string, action: "confirm" | "issue"): Promise<boolean> {
   const redis = getRedis();

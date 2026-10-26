@@ -5,14 +5,10 @@ import { begin, finish, abort } from "../session/hotPath.js";
 import { runWithDraft } from "../session/draftStore.js";
 import { COPY } from "../conversation/copy.js";
 import { sendMessage } from "../whatsapp/metaClient.js";
-import {
-  handleAdminAction,
-  handleMockupGenAction,
-  handleAdminTextCommand,
-  isAuthorizedAdmin,
-} from "../admin/actions.js";
-import { getChatPendingGenerationId } from "../mockup/generationStore.js";
-import { attachPaymentProof } from "../mockup/paidGeneration.js";
+import { isAuthorizedAdmin } from "../admin/auth.js";
+// Admin handlers, generation store and paid-mockup flow pull in Sheets,
+// Blob and the mockup pipeline: they are `await import()`ed only on the
+// paths that need them (T5 cold start).
 import { runWithTiming, setTimingStep } from "../shared/timing.js";
 
 let initialized = false;
@@ -86,17 +82,20 @@ async function routeMessage(chatId: string, message: any) {
     // 1. Intercept admin button actions
     if (input?.startsWith("admin:")) {
       setTimingStep("adminAction");
+      const { handleAdminAction } = await import("../admin/actions.js");
       await handleAdminAction(chatId, input, message);
       return;
     }
     if (input?.startsWith("mockupgen:")) {
       setTimingStep("mockupGenAction");
+      const { handleMockupGenAction } = await import("../admin/actions.js");
       await handleMockupGenAction(chatId, input, message);
       return;
     }
 
     // 2. Intercept admin typed commands (6-digit approval code, "CONFIRM <order>", etc.)
     if (input && isAuthorizedAdmin(chatId)) {
+      const { handleAdminTextCommand } = await import("../admin/actions.js");
       const handled = await handleAdminTextCommand(chatId, input);
       if (handled) {
         setTimingStep("adminCommand");
@@ -106,9 +105,11 @@ async function routeMessage(chatId: string, message: any) {
 
     // 3. Paid mockup proof interception: customer sends proof photo while pending paid mockup
     if (isImage && imageId) {
+      const { getChatPendingGenerationId } = await import("../mockup/generationStore.js");
       const pendingGenId = await getChatPendingGenerationId(chatId);
       if (pendingGenId) {
         console.log(`[bot] Found pending paid generation ${pendingGenId} for ${chatId}, attaching payment proof`);
+        const { attachPaymentProof } = await import("../mockup/paidGeneration.js");
         const result = await attachPaymentProof(pendingGenId, imageId);
         if (result.ok) {
           setTimingStep("paidMockupProof");

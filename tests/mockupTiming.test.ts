@@ -25,14 +25,15 @@ test("order ID is created, then the mockup step runs, then the payment stage —
   // /api/mockup-delivery function (it must never run in the webhook budget).
   const idxMockup = flowSrc.indexOf("triggerMockupDelivery(order.orderId)");
   const idxPayment = flowSrc.indexOf("S11 Payment");
-  // Call site of the QR generator (not the import at the top of the file).
-  const idxQrCall = flowSrc.indexOf("generateUpiQrPng(env.MERCHANT_VPA");
+  // Send of the payment QR (static merchant QR; the dead dynamic-QR
+  // generator call was removed in T5).
+  const idxQrCall = flowSrc.indexOf("sendMedia(chatId, qrUrl");
 
   assert.ok(idxLogoDone > 0, "logo-upload completion marker must exist");
   assert.ok(idxOrderId > 0, "order ID creation must exist");
   assert.ok(idxMockup > 0, "mockup step must exist in the flow");
   assert.ok(idxPayment > 0, "payment stage marker must exist");
-  assert.ok(idxQrCall > 0, "UPI QR generation call must exist");
+  assert.ok(idxQrCall > 0, "payment QR send must exist");
 
   // Order ID is created after logos are collected.
   assert.ok(idxOrderId > idxLogoDone, "order ID must be created after logo upload");
@@ -40,7 +41,7 @@ test("order ID is created, then the mockup step runs, then the payment stage —
   assert.ok(idxMockup > idxOrderId, "mockup must run after the order ID is created");
   // Mockup runs BEFORE the payment stage / QR.
   assert.ok(idxMockup < idxPayment, "mockup must run before the S11 payment stage");
-  assert.ok(idxMockup < idxQrCall, "mockup must run before the UPI QR (payment) is generated");
+  assert.ok(idxMockup < idxQrCall, "mockup must run before the payment QR is sent");
 });
 
 test("the admin confirm handler no longer triggers a post-payment mockup (moved earlier)", () => {
