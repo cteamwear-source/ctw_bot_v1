@@ -13,7 +13,10 @@
  *    phone-backed counter — CB-06 — and the phone-less chat fallback),
  *  - the same phone gets independent free allowances in different Kolkata
  *    months (CB-06),
- *  - commit is idempotent per generationId.
+ *  - commit is idempotent per generationId,
+ *  - interleaved reservations for one bucket are serialized by the CB-07
+ *    bucket lock — only ONE is free once the allowance is committed, and an
+ *    abandoned (PX-expired) lock does not wedge later reservations.
  */
 import "./support/testEnv.js";
 import { test, beforeEach } from "node:test";
@@ -25,6 +28,7 @@ import {
   commitFreeGeneration,
   kolkataMonthKey,
   peekUsage,
+  quotaLockKey,
 } from "../src/mockup/quota.js";
 
 let redis: FakeRedis;
@@ -173,4 +177,116 @@ test("per-chat fallback isolation when phone not provided: one chat's usage does
 
   const otherFirst = await reserveGeneration(other, "o1", AUG);
   assert.equal(otherFirst.free, true);
+});
+
+// ---------------------------------------------------------------------------
+// CB-07: cross-generation quota race. reserveGeneration used to read the
+// committed counter, decide free/paid, and write the sticky decision with no
+// serialization — two interleaved reservations for the same bucket could
+// both read the counter before the first commit landed and BOTH be decided
+// free (free double-spend beyond MOCKUP_FREE_PER_MONTH). The per-bucket
+// lock (quotaLockKey) serializes the read → decide → record window, so a
+// reservation whose decision follows another generation's commit re-reads
+// the counter under the lock, sees the commit, and goes paid.
+// ---------------------------------------------------------------------------
+
+/**
+ * FakeRedis that can HOLD lock acquisitions (SET NX on mockupquota:lock:*)
+ * for one specific generationId until the test drains them — lets a test
+ * deterministically interleave a second reservation behind a first
+ * reservation + commit, exactly modelling a slow request (background worker)
+ * racing the fast in-process leg.
+ */
+class GatedRedis extends FakeRedis {
+  private gateValue: string | null = null;
+  private held: Array<() => Promise<unknown>> = [];
+
+  /** Hold lock SETs whose value (the holder generationId) matches. */
+  gateLocksHeldBy(value: string): void {
+    this.gateValue = value;
+  }
+
+  /** Release every held lock acquisition (executes them against the store). */
+  async drainHeldLocks(): Promise<void> {
+    const held = this.held;
+    this.held = [];
+    this.gateValue = null;
+    for (const op of held) await op();
+  }
+
+  override async set(
+    key: string,
+    value: unknown,
+    opts?: { nx?: boolean; ex?: number; px?: number },
+  ): Promise<string | null> {
+    const gated =
+      this.gateValue !== null &&
+      typeof value === "string" &&
+      value === this.gateValue &&
+      key.startsWith("mockupquota:lock:");
+    if (gated) {
+      return new Promise<string | null>((resolve) => {
+        this.held.push(async () => resolve(await super.set(key, value, opts)));
+      });
+    }
+    return super.set(key, value, opts);
+  }
+}
+
+test("CB-07: a reservation decided after another generation's commit is paid — no free double-spend", async () => {
+  const gated = new GatedRedis();
+  __setRedisForTests(gated);
+
+  // Kick off reservation B: it reads its (miss) sticky decision, then blocks
+  // trying to take the bucket lock — its read → decide window is frozen
+  // mid-flight, exactly like a slow request racing the in-process leg.
+  gated.gateLocksHeldBy("race-b");
+  const pB = reserveGeneration(CHAT, "race-b", { phone: PHONE, views: ["front", "back"], at: AUG });
+  await new Promise((resolve) => setImmediate(resolve)); // let B reach the gated lock
+
+  // The in-process leg completes a full free cycle: reserve + commit.
+  const rA = await succeedFree(CHAT, "race-a", { phone: PHONE, at: AUG });
+  assert.equal(rA.free, true, "first generation takes the (single) free slot");
+
+  // B's frozen request now proceeds — it must re-read the counter under the
+  // bucket lock and see A's commit (allowance exhausted).
+  await gated.drainHeldLocks();
+  const rB = await pB;
+  assert.equal(rB.free, false, "second reservation must see the committed slot and be decided paid (CB-07)");
+  assert.equal(rB.amountInr, 20);
+
+  // The bucket is left unlocked after both decisions.
+  assert.equal(gated.keys().some((k) => k.startsWith("mockupquota:lock:")), false);
+});
+
+test("CB-07: an abandoned (PX-expired) bucket lock does not wedge later reservations", async () => {
+  // Simulate a crashed holder: the lock exists and is never DELed. In prod
+  // the short PX TTL self-heals it; FakeRedis TTLs are frozen, so the test
+  // models expiry with __expire.
+  const lockKey = quotaLockKey("5512345678", kolkataMonthKey(AUG), PHONE);
+  await redis.set(lockKey, "crashed-generation", { nx: true, px: 8_000 });
+  redis.__expire(lockKey);
+
+  // Later reservations acquire the lock, decide, and release it normally.
+  const r1 = await reserveGeneration(CHAT, "after-crash-1", { phone: PHONE, at: AUG });
+  assert.equal(r1.free, true);
+  await commitFreeGeneration(CHAT, "after-crash-1", { phone: PHONE, at: AUG });
+
+  const r2 = await reserveGeneration(CHAT, "after-crash-2", { phone: PHONE, at: AUG });
+  assert.equal(r2.free, false, "normal bucket locking resumes after the abandoned lock expires");
+  assert.equal(redis.keys().some((k) => k.startsWith("mockupquota:lock:")), false, "lock released after use");
+});
+
+test("CB-07: a still-held lock fails open after brief retries — the flow never wedges, and we never release a lock we don't own", async () => {
+  const lockKey = quotaLockKey("5512345678", kolkataMonthKey(AUG), PHONE);
+  await redis.set(lockKey, "crashed-generation", { nx: true, px: 8_000 });
+
+  // The decision still happens (fail-open after ~500ms of brief retries)
+  // rather than throwing or wedging the customer flow.
+  const r = await reserveGeneration(CHAT, "fail-open-1", { phone: PHONE, at: AUG });
+  assert.equal(r.free, true, "reservation must still be decided (fail-open) while the lock is held by another");
+
+  // Fail-open must NOT delete a lock we don't own — the crashed holder's
+  // lock survives until its PX TTL (modeled by __expire) cleans it up.
+  assert.equal(await redis.get(lockKey), "crashed-generation");
 });

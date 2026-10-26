@@ -2,7 +2,8 @@
  * In-memory fake of the RedisLike surface used by the app, faithful enough
  * for the mockup quota / generation-store idempotency tests:
  *  - SET with { nx } only writes when the key is absent (returns "OK" or null).
- *  - SET with { ex } records a TTL (not expired in-test unless advanced).
+ *  - SET with { ex } records a TTL (not expired in-test unless advanced);
+ *    { px } is accepted too (milliseconds, recorded as a frozen TTL).
  *  - INCR treats a missing key as 0.
  *  - Values round-trip through JSON, mirroring @upstash/redis auto-JSON.
  */
@@ -26,11 +27,14 @@ export class FakeRedis implements RedisLike {
   async set(
     key: string,
     value: unknown,
-    opts?: { nx?: boolean; ex?: number },
+    opts?: { nx?: boolean; ex?: number; px?: number },
   ): Promise<string | null> {
     if (opts?.nx && this.store.has(key)) return null;
     this.store.set(key, JSON.stringify(value));
     if (opts?.ex !== undefined) this.ttlMap.set(key, opts.ex);
+    // CB-07: px (milliseconds) is recorded as a frozen TTL like ex — the fake
+    // has no clock, so expiry is simulated via __expire() in tests.
+    if (opts?.px !== undefined) this.ttlMap.set(key, opts.px / 1000);
     return "OK";
   }
 
@@ -65,5 +69,15 @@ export class FakeRedis implements RedisLike {
   /** Test helper: raw view of stored keys. */
   keys(): string[] {
     return [...this.store.keys()];
+  }
+
+  /**
+   * Test helper (CB-07): simulate a key's PX/EX TTL elapsing. The fake has no
+   * clock (TTLs are frozen), so tests call this to model expiry — e.g. an
+   * abandoned quota lock self-healing after its short PX TTL.
+   */
+  __expire(key: string): void {
+    this.store.delete(key);
+    this.ttlMap.delete(key);
   }
 }
