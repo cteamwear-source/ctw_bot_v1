@@ -27,3 +27,5 @@ quality/
 # Test output directories
 mockup-test-output/
 
+.worktrees/
+.agents/
