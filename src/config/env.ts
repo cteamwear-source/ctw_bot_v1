@@ -69,9 +69,11 @@ export interface Env {
   MOCKUP_IMAGE_PROVIDER?: string;
   /**
    * Shared secret protecting the internal /api/mockup-delivery endpoint
-   * (see src/mockup/deliverTrigger.ts). MUST be a separate value from
+   * (see src/mockup/deliverTrigger.ts) AND the /api/health `?test_resend=1`
+   * outbound-email trigger (CB-03). MUST be a separate value from
    * META_WEBHOOK_SECRET — different trust boundary (internal paid-AI
-   * trigger vs internet-facing webhook). Fail-closed when unset.
+   * trigger vs internet-facing webhook). Fail-closed when unset: both
+   * features are disabled rather than left unauthenticated.
    */
   INTERNAL_MOCKUP_SECRET?: string;
   /** Explicit override for the base URL used to call /api/mockup-delivery. Falls back to Vercel's system env vars. */
