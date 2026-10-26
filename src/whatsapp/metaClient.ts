@@ -41,14 +41,21 @@ async function metaFetch(path: string, body: Record<string, unknown>): Promise<a
   }
 }
 
-/** Strip the "wa:" prefix if present and return bare phone number */
+/** Mask phone/chat ID for logging — show only last 4 digits or "wa:***" */
+function maskTo(to: string): string {
+  const bare = to.replace(/^(wa:)+/gi, "").replace(/^\+/, "").trim();
+  if (bare.length <= 4) return "***";
+  return `***${bare.slice(-4)}`;
+}
+
+/** Strip the "wa:" prefix if present and return bare phone number for Meta API */
 function phone(to: string): string {
   return to.replace(/^(wa:)+/gi, "").replace(/^\+/, "").trim();
 }
 
 /** Send a plain text message */
 export async function sendMessage(to: string, text: string) {
-  console.log(`[metaClient] sendMessage to=${to} type=text len=${text.length}`);
+  console.log(`[metaClient] sendMessage to=${maskTo(to)} type=text len=${text.length}`);
   return metaFetch('/messages', {
     messaging_product: 'whatsapp',
     to: phone(to),
@@ -59,7 +66,7 @@ export async function sendMessage(to: string, text: string) {
 
 /** Send an image with optional caption */
 export async function sendMedia(to: string, mediaUrl: string, caption?: string) {
-  console.log(`[metaClient] sendMedia to=${to} type=image hasCaption=${Boolean(caption)}`);
+  console.log(`[metaClient] sendMedia to=${maskTo(to)} type=image hasCaption=${Boolean(caption)}`);
   return metaFetch('/messages', {
     messaging_product: 'whatsapp',
     to: phone(to),
@@ -78,7 +85,7 @@ export async function sendInteractiveButtons(
   buttons: Array<{ id: string; title: string }>,
   footerText?: string,
 ) {
-  console.log(`[metaClient] sendInteractiveButtons to=${to} type=button buttons=${buttons.length}`);
+  console.log(`[metaClient] sendInteractiveButtons to=${maskTo(to)} type=button buttons=${buttons.length}`);
   // WhatsApp Cloud API enforces: max 3 buttons, max 20 chars per title, max 256 chars per id
   const validButtons = buttons.slice(0, 3).map(b => ({
     type: 'reply' as const,
@@ -111,7 +118,7 @@ export async function sendInteractiveList(
   sections: Array<{ title?: string; rows: Array<{ id: string; title: string; description?: string }> }>,
   footerText?: string,
 ) {
-  console.log(`[metaClient] sendInteractiveList to=${to} type=list rows=${sections.reduce((n, s) => n + s.rows.length, 0)}`);
+  console.log(`[metaClient] sendInteractiveList to=${maskTo(to)} type=list rows=${sections.reduce((n, s) => n + s.rows.length, 0)}`);
   // WhatsApp Cloud API enforces: max 20 chars button text, max 24 chars row title, max 72 chars description, max 200 chars id
   return metaFetch('/messages', {
     messaging_product: 'whatsapp',

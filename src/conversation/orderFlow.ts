@@ -38,7 +38,9 @@ export interface WhatsAppContext {
 }
 
 export async function handleWhatsAppMessage(chatId: string, message: any) {
-  console.log(`[orderFlow] MESSAGE OBJECT:`, JSON.stringify(message));
+  // Log minimal metadata only — no PII (name, phone, media IDs, etc.)
+  const msgType = message?.type ?? "unknown";
+  console.log(`[orderFlow] msgType=${msgType} chatId=${chatId}`);
   console.log(`[orderFlow] message.text is:`, message.text);
   let input =
     message.text?.body ||
