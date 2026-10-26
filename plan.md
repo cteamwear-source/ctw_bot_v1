@@ -146,13 +146,19 @@ Design rules:
 
 | Metric | Before | After |
 |---|---|---|
-| Webhook module import time (local, tsx, `tests/support/coldStartProbe.ts`) | ~10.6s (10722 / 10569ms) | ~0.4–1.4s (398–1449ms) |
-| Redis round-trips per static step | | |
+| Webhook module import time, median of 3 (local, tsx, `.agents/tasks/perf-fast-replies/measure-import.mjs`) | 7282 ms (6983 / 8366 / 7282) | 277 ms (280 / 271 / 277) |
+| Heavy packages loaded by importing `api/webhook.ts` (sharp, google-spreadsheet, google-auth-library, @vercel/blob, qrcode, @sentry/node) | 6 of 6 | 0 of 6 |
+| Redis round-trips per static step (`tests/latencyBudget.test.ts`) | 2 fresh / 1 warm (memory cache); dedupe, lock, rate limit in-memory only; 0 pipelines | 2 on every instance (begin + finish pipelines, incl. Redis-backed dedupe, lock, rate limit) |
+| Sends per static screen (tier button press) | 1 | 1 |
 | Sends per reprompt | 2 | 1 |
-| Warm static reply, server p95 | | |
-| Cold static reply | | |
-| Quote screen | | |
-| Screenshot ack | | |
+| Send attempts when every send returns HTTP 400 | 3, no retries | 3, no retries (4xx never retried) |
+| Test count (`npm test`) | 166 pass / 0 fail | 221 pass / 0 fail |
+| Warm static reply, server p95 | not measured locally | measure in production via timing logs / `npm run latency-probe` |
+| Cold static reply | not measured locally | measure in production |
+| Quote screen | not measured locally | measure in production |
+| Screenshot ack | not measured locally | measure in production |
+
+Import times include tsx transpilation on a noisy Windows dev machine (Node v22.18.0); compare only runs from the same script and machine.
 
 ## Not in this plan (later)
 
