@@ -9,7 +9,10 @@
  *  - the decision is sticky per generationId (retry stays free/paid, no
  *    re-charge, no double-count),
  *  - a front+back request is ONE generation (single generationId),
- *  - the counter resets at the Kolkata calendar-month boundary,
+ *  - the counter resets at the Kolkata calendar-month boundary (both the
+ *    phone-backed counter — CB-06 — and the phone-less chat fallback),
+ *  - the same phone gets independent free allowances in different Kolkata
+ *    months (CB-06),
  *  - commit is idempotent per generationId.
  */
 import "./support/testEnv.js";
@@ -69,14 +72,14 @@ test("quota is tracked per phone number: 1 free per phone number", async () => {
   const r1 = await succeedFree(CHAT, "phone-1", { phone: PHONE });
   assert.equal(r1.free, true);
 
-  // Same phone from a different chat or same chat -> paid
+  // Same phone from a different chat or same chat -> paid (same Kolkata month)
   const otherChat = "tg:9998887777";
-  const r2 = await reserveGeneration(otherChat, "phone-2", { phone: "9876543210", views: ["front", "back"] });
+  const r2 = await reserveGeneration(otherChat, "phone-2", { phone: "9876543210", views: ["front", "back"], at: AUG });
   assert.equal(r2.free, false);
   assert.equal(r2.amountInr, 20);
 
   // Different phone -> free!
-  const rOtherPhone = await reserveGeneration(otherChat, "other-phone-1", { phone: "9123456780" });
+  const rOtherPhone = await reserveGeneration(otherChat, "other-phone-1", { phone: "9123456780", at: AUG });
   assert.equal(rOtherPhone.free, true);
 });
 
@@ -105,6 +108,61 @@ test("a paid generation stays paid on a repeated reservation (sticky, no second 
 test("month key uses the Asia/Kolkata calendar, not UTC", () => {
   assert.equal(kolkataMonthKey(new Date("2026-08-31T20:00:00Z")), "2026-09");
   assert.equal(kolkataMonthKey(new Date("2026-08-31T17:00:00Z")), "2026-08");
+});
+
+// ---------------------------------------------------------------------------
+// CB-06: the phone-backed counter must be month-keyed (Kolkata months).
+// Before CB-06 the phone key had no month component and a 1-year TTL, so the
+// "monthly" free allowance behaved like an annual per-phone allowance.
+// ---------------------------------------------------------------------------
+
+const PHONE = "+91 98765 43210";
+const SEP = new Date("2026-09-15T12:00:00Z");
+
+test("CB-06: phone-backed counter resets at the Asia/Kolkata month boundary", async () => {
+  // Exhaust the (single, per testEnv) free slot for August with the phone present.
+  const aug1 = await succeedFree(CHAT, "aug-p1", { phone: PHONE, at: AUG });
+  assert.equal(aug1.free, true);
+  const aug2 = await reserveGeneration(CHAT, "aug-p2", { phone: PHONE, at: AUG });
+  assert.equal(aug2.free, false, "same phone later in the same August must be paid");
+
+  // Same phone in September → fresh free allowance (month-keyed counter).
+  const sep1 = await reserveGeneration(CHAT, "sep-p1", { phone: PHONE, at: SEP });
+  assert.equal(sep1.free, true, "phone counter must reset at the Kolkata month boundary");
+  assert.equal(sep1.monthKey, "2026-09");
+  assert.equal(sep1.committedFreeThisMonth, 0, "September phone counter starts at zero");
+
+  // And September also exhausts after one committed free generation.
+  await commitFreeGeneration(CHAT, "sep-p1", { phone: PHONE, at: SEP });
+  const sep2 = await reserveGeneration(CHAT, "sep-p2", { phone: PHONE, at: SEP });
+  assert.equal(sep2.free, false, "committed September usage must count against September");
+});
+
+test("CB-06: same phone in two different months gets independent free allowances", async () => {
+  const sep1 = await succeedFree(CHAT, "indep-sep1", { phone: PHONE, at: SEP });
+  assert.equal(sep1.free, true);
+  const sep2 = await reserveGeneration(CHAT, "indep-sep2", { phone: PHONE, at: SEP });
+  assert.equal(sep2.free, false, "September allowance exhausted after one commit");
+
+  // Going back to August (a different Kolkata month) gives a fresh allowance —
+  // the August counter was never touched by the September usage.
+  const aug1 = await succeedFree(CHAT, "indep-aug1", { phone: PHONE, at: AUG });
+  assert.equal(aug1.free, true, "August allowance independent of September usage");
+  const aug2 = await reserveGeneration(CHAT, "indep-aug2", { phone: PHONE, at: AUG });
+  assert.equal(aug2.free, false);
+});
+
+test("CB-06: commit uses the decision's monthKey — an August-decided generation never consumes September", async () => {
+  const r = await reserveGeneration(CHAT, "gen-aug-decided", { phone: PHONE, at: AUG });
+  assert.equal(r.free, true);
+  // Commit lands in September (e.g. delayed success callback) but the decision
+  // was bucketed into August.
+  await commitFreeGeneration(CHAT, "gen-aug-decided", { phone: PHONE, at: SEP });
+
+  const sepUsage = await peekUsage(CHAT, { phone: PHONE, at: SEP });
+  assert.equal(sepUsage.committedFreeThisMonth, 0, "September counter untouched by an August decision");
+  const augUsage = await peekUsage(CHAT, { phone: PHONE, at: AUG });
+  assert.equal(augUsage.committedFreeThisMonth, 1, "August counter consumed");
 });
 
 test("per-chat fallback isolation when phone not provided: one chat's usage does not affect another", async () => {

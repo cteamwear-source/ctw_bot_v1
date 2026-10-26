@@ -38,7 +38,6 @@ import type { MockupView } from "../shared/types.js";
 
 const IST_OFFSET_MINUTES = 5 * 60 + 30; // Asia/Kolkata is a fixed +05:30, no DST
 const MONTH_TTL_SECONDS = 40 * 24 * 60 * 60; // > 1 month so the counter survives the whole billing month
-const PHONE_QUOTA_TTL_SECONDS = 365 * 24 * 60 * 60; // 1 year for phone number quota
 
 /** Returns the Asia/Kolkata calendar-month key (YYYY-MM) for a given instant. */
 export function kolkataMonthKey(at: Date = new Date()): string {
@@ -61,10 +60,23 @@ function chatBucket(customerChatId: string): string {
   return match ? match[1] : customerChatId;
 }
 
-/** Counter key: phone-based if phone provided, otherwise per-chat month-based. */
+/**
+ * Counter key: phone-based if phone provided, otherwise per-chat — BOTH are
+ * month-keyed so the free allowance resets at the Asia/Kolkata month
+ * boundary.
+ *
+ * CB-06: the phone key previously had NO month component
+ * (`mockupquota:phone:<last10>`, 1-year rolling TTL refreshed on every
+ * INCR), which made the "monthly" free allowance behave like an annual
+ * per-phone allowance for active customers. Old-format keys are simply
+ * orphaned by this change (their counters reset to zero for the current
+ * month) — no migration, no paid record is lost.
+ */
 function quotaCounterKey(bucket: string, monthKey: string, phone?: string): string {
   const clean = normalizePhoneForQuota(phone);
-  return clean ? `mockupquota:phone:${clean}` : `mockupquota:freecommitted:${bucket}:${monthKey}`;
+  return clean
+    ? `mockupquota:phone:${clean}:${monthKey}`
+    : `mockupquota:freecommitted:${bucket}:${monthKey}`;
 }
 
 /** Sticky free-vs-paid decision for a single generationId. */
@@ -174,8 +186,8 @@ export async function commitFreeGeneration(
   const monthKey = decision.monthKey || kolkataMonthKey(at);
   const counterKey = quotaCounterKey(bucket, monthKey, phone);
   await redis.incr(counterKey);
-  const ttl = normalizePhoneForQuota(phone) ? PHONE_QUOTA_TTL_SECONDS : MONTH_TTL_SECONDS;
-  await redis.expire(counterKey, ttl);
+  // Both counter variants are month-keyed (CB-06), so one TTL covers both.
+  await redis.expire(counterKey, MONTH_TTL_SECONDS);
 }
 
 /**

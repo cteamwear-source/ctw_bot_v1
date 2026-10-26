@@ -154,7 +154,7 @@ no-payment cancel → "Lead — No Payment".
 | `order:<orderId>` | 14d | order snapshot (admin confirm / mockup recovery) |
 | `admin-action:<orderId>` | 90d | admin confirm/issue idempotency |
 | `mockupgen:*` | 60d | generation record + indexes (`mockupgen:<genId>`, `mockupgen:order:<orderId>`, `mockupgen:pending:<chatId>`, `mockupgen:decision:<genId>`) |
-| `mockupquota:*` | ~40d | free-monthly quota (`mockupquota:freecommitted:<chat>:<month>`, sticky `mockupquota:decision:<genId>`, `mockupquota:committed:<genId>`) |
+| `mockupquota:*` | ~40d | free-monthly quota (`mockupquota:freecommitted:<chat>:<month>` and phone-backed `mockupquota:phone:<last10>:<month>` — both month-keyed, CB-06; sticky `mockupquota:decision:<genId>`, `mockupquota:committed:<genId>`) |
 | `ratelimit:ctw*`, `ratelimit:mockup*` | — | sliding-window limiters |
 
 Customer chat ids are stored as `"wa:<id>"` prefix strings.
