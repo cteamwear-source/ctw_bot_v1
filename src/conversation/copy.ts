@@ -134,6 +134,10 @@ export const COPY = {
 
   mockupGeneratingNote: "🎨 Generating your preview on the exact T-Shirt you picked — one moment…",
 
+  /** Appended to the "generating" line: the quote/QR follow now, the mockup arrives later from the worker. */
+  mockupArrivingShortly:
+    "Your mockup will arrive here shortly. Meanwhile, here's your quote and payment details 👇",
+
   /** Sent with the deterministic proof so the customer knows it's the real print reference. */
   mockupProofCaption: (view: "front" | "back") =>
     `🎨 Print proof — your logo on the exact selected T-Shirt (${view === "front" ? "front" : "back"}). This is the true placement; nothing about the shirt or logo is altered.`,

@@ -23,6 +23,7 @@ import { waitUntil } from "@vercel/functions";
 import { getEnv } from "../src/config/env.js";
 import { loadOrderSnapshot } from "../src/session/orderStore.js";
 import { startMockupGeneration } from "../src/mockup/workflow.js";
+import type { MockupDeliveryDeps } from "../src/mockup/deliver.js";
 import { notifyAdminsText } from "../src/admin/notify.js";
 import { sendMessage } from "../src/whatsapp/metaClient.js";
 import { COPY } from "../src/conversation/copy.js";
@@ -74,55 +75,76 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // invocation alive to actually do the work after the response is sent.
   res.status(202).send("Accepted");
 
-  waitUntil(
-    (async () => {
-      const orderSnapshot = await loadOrderSnapshot(orderId).catch((err: any) => {
-        console.error(`Failed to load order snapshot for mockup delivery (${orderId}):`, err);
-        return undefined;
-      });
-      if (!orderSnapshot) {
-        console.warn(`No order snapshot found for ${orderId}; skipping mockup delivery.`);
-        await notifyAdminsText(
-          `⚠️ Mockup for ${orderId} was never sent — order snapshot expired/missing from cache before generation could run.`,
-        ).catch(() => {});
-        return;
-      }
-      // Route through the workflow so the monthly free quota + paid
-      // (₹20/generation) path is applied. startMockupGeneration is fully
-      // idempotent (keyed on orderId), so a duplicate trigger re-enters the
-      // same workflow rather than reserving a second slot or charging twice.
-      //
-      // PRD §7's "escalation never fails silently" rule (product.md): any
-      // skip/failure is otherwise invisible, so we escalate to admins.
-      const outcome = await startMockupGeneration(orderSnapshot);
-      switch (outcome.kind) {
-        case "generated":
-        case "already-completed":
-          break; // delivered to the customer
-        case "payment-required": {
-          // Ask the customer to pay for this extra mockup; nothing is
-          // generated until an admin approves the payment proof.
-          const env2 = getEnv();
-          const chatId = orderSnapshot.customerChatId.replace(/^wa:/, "");
-          if (chatId) {
-            await sendMessage(chatId, COPY.mockupPaidRequired(outcome.amountInr, env2.MOCKUP_FREE_PER_MONTH))
-              .catch((err: any) => console.error(`Failed to send paid-mockup prompt for ${orderId}:`, err));
-          }
-          await notifyAdminsText(
-            `💳 Mockup for ${orderId} needs payment (₹${outcome.amountInr}) — customer's free monthly quota is used up. Awaiting their payment proof.`,
-          ).catch(() => {});
-          break;
-        }
-        case "awaiting-approval":
-          await notifyAdminsText(`⏳ Mockup for ${orderId} is awaiting admin approval of the customer's payment proof.`).catch(() => {});
-          break;
-        case "generation-failed":
-          await notifyAdminsText(`⚠️ Mockup for ${orderId} was not delivered: ${outcome.reason}`).catch(() => {});
-          break;
-        case "skipped":
-          // No artwork etc. — nothing promised to the customer, no escalation needed.
-          break;
-      }
-    })(),
+  waitUntilImpl(
+    runJob(orderId).catch(async (err: unknown) => {
+      // Outer catch: a crash anywhere in the job must still reach the admins.
+      console.error(`[mockup-delivery] job crashed for ${orderId}:`, err);
+      await notifyAdminsText(
+        `⚠️ Mockup job crashed for ${orderId}: ${err instanceof Error ? err.message : String(err)}. The customer has not received a mockup.`,
+      ).catch(() => {});
+    }),
   );
+}
+
+async function runJob(orderId: string): Promise<void> {
+  const orderSnapshot = await loadOrderSnapshot(orderId).catch((err: any) => {
+    console.error(`Failed to load order snapshot for mockup delivery (${orderId}):`, err);
+    return undefined;
+  });
+  if (!orderSnapshot) {
+    console.warn(`No order snapshot found for ${orderId}; skipping mockup delivery.`);
+    await notifyAdminsText(
+      `⚠️ Mockup for ${orderId} was never sent — order snapshot expired/missing from cache before generation could run.`,
+    ).catch(() => {});
+    return;
+  }
+  // Route through the workflow so the monthly free quota + paid
+  // (₹20/generation) path is applied. startMockupGeneration is fully
+  // idempotent (keyed on orderId), so a duplicate trigger re-enters the
+  // same workflow rather than reserving a second slot or charging twice.
+  //
+  // PRD §7's "escalation never fails silently" rule (product.md): any
+  // skip/failure is otherwise invisible, so we escalate to admins.
+  const outcome = await startMockupGeneration(orderSnapshot, mockupDeps);
+  switch (outcome.kind) {
+    case "generated":
+    case "already-completed":
+      break; // delivered to the customer
+    case "payment-required": {
+      // Ask the customer to pay for this extra mockup; nothing is
+      // generated until an admin approves the payment proof.
+      const env2 = getEnv();
+      const chatId = orderSnapshot.customerChatId.replace(/^wa:/, "");
+      if (chatId) {
+        await sendMessage(chatId, COPY.mockupPaidRequired(outcome.amountInr, env2.MOCKUP_FREE_PER_MONTH))
+          .catch((err: any) => console.error(`Failed to send paid-mockup prompt for ${orderId}:`, err));
+      }
+      await notifyAdminsText(
+        `💳 Mockup for ${orderId} needs payment (₹${outcome.amountInr}) — customer's free monthly quota is used up. Awaiting their payment proof.`,
+      ).catch(() => {});
+      break;
+    }
+    case "awaiting-approval":
+      await notifyAdminsText(`⏳ Mockup for ${orderId} is awaiting admin approval of the customer's payment proof.`).catch(() => {});
+      break;
+    case "generation-failed":
+      await notifyAdminsText(`⚠️ Mockup for ${orderId} was not delivered: ${outcome.reason}`).catch(() => {});
+      break;
+    case "skipped":
+      // No artwork etc. — nothing promised to the customer, no escalation needed.
+      break;
+  }
+}
+
+let waitUntilImpl: (p: Promise<unknown>) => void = waitUntil;
+let mockupDeps: MockupDeliveryDeps = {};
+
+/** Test seam: capture the background job instead of Vercel's waitUntil. */
+export function __setWaitUntilForTests(fn: ((p: Promise<unknown>) => void) | undefined): void {
+  waitUntilImpl = fn ?? waitUntil;
+}
+
+/** Test seam: inject compositor / uploader / sender / logo fetcher fakes. */
+export function __setMockupDepsForTests(deps: MockupDeliveryDeps | undefined): void {
+  mockupDeps = deps ?? {};
 }

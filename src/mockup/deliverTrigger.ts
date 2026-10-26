@@ -22,7 +22,7 @@
 
 import { getEnv } from "../config/env.js";
 
-const TRIGGER_TIMEOUT_MS = 5_000; // just long enough to hand off the request; never blocks on generation itself
+const TRIGGER_TIMEOUT_MS = 3_000; // just long enough to get the 202; never blocks on generation itself
 
 function resolveBaseUrl(): string {
   const env = getEnv();
@@ -35,7 +35,10 @@ function resolveBaseUrl(): string {
 }
 
 /**
- * Dispatches mockup generation for the given order to /api/mockup-delivery.
+ * Dispatches mockup generation for the given order to /api/mockup-delivery
+ * and waits only for its 202. Generation (quota via startMockupGeneration,
+ * AI or Sharp, Blob, sends) never runs in the caller's process. The order
+ * snapshot must already be saved: the worker loads it from Redis.
  *
  * SECURITY: generation must ALWAYS go through the worker, which calls
  * startMockupGeneration() and therefore the monthly quota + ₹20 paid flow.

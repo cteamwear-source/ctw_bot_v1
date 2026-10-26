@@ -8,6 +8,7 @@ import type { MockupGenerationInput, MockupGenerationResult } from "./imageProvi
 
 const DEFAULT_MODEL = "gpt-image-2.5-flare-2026-09-08";
 const OPENAI_IMAGES_EDITS_URL = "https://api.openai.com/v1/images/edits";
+const RESULT_DOWNLOAD_TIMEOUT_MS = 30_000;
 
 function guessMimeType(buffer: Buffer): string {
   if (buffer.length > 8 && buffer[0] === 0x89 && buffer[1] === 0x50) return "image/png";
@@ -69,17 +70,18 @@ export async function generateOpenAiMockup(
       body: form,
       signal: controller.signal,
     });
-    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errText = await response.text().catch(() => "<no body>");
       throw new Error(`OpenAI image edit request failed (${response.status}): ${errText}`);
     }
 
+    // The 90s timeout also covers reading the (large) JSON body.
     const data = (await response.json()) as {
       data?: Array<{ b64_json?: string; url?: string }>;
       usage?: { total_tokens?: number };
     };
+    clearTimeout(timeoutId);
 
     const first = data.data?.[0];
     if (!first) {
@@ -95,7 +97,8 @@ export async function generateOpenAiMockup(
     }
 
     if (first.url) {
-      const imgRes = await fetch(first.url);
+      // Hard 30s cap on the result download (covers the body read too).
+      const imgRes = await fetch(first.url, { signal: AbortSignal.timeout(RESULT_DOWNLOAD_TIMEOUT_MS) });
       if (!imgRes.ok) {
         throw new Error(`Failed to download generated image from OpenAI URL: ${first.url}`);
       }

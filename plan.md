@@ -10,7 +10,7 @@ Status: in progress. Tick each box when its task is merged and `npm test` + `npm
 - [x] **T4** One send per static screen; 8s send timeout + 1 retry; safer menu fallback
 - [x] **T5** Lazy-load heavy modules (sharp, Sheets, Blob, AI, qrcode, Sentry); cold-start test
 - [x] **T6** Faster quote/payment; customer reply first, Sheets + admin notify in parallel after
-- [ ] **T7** AI mockup only in the worker; quote/QR sent at once; 3 free per month then ₹20 paid flow
+- [x] **T7** AI mockup only in the worker; quote/QR sent at once; 3 free per month then ₹20 paid flow
 - [ ] **T8** Every failure gets a customer reply; timeouts on Sheets
 - [ ] **T9** `regions: ["bom1"]`, warm endpoint for uptime pinger, latency probe script, docs + `BUILD_STAMP`
 

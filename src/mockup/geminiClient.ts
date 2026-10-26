@@ -75,13 +75,13 @@ export async function generateGeminiMockup(
       }),
       signal: controller.signal,
     });
-    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const bodyText = await response.text().catch(() => "<no body>");
       throw new Error(`Gemini image request failed (${response.status}): ${bodyText}`);
     }
 
+    // The 90s timeout also covers reading the (large) JSON body.
     const result = (await response.json()) as {
       candidates?: {
         content?: { parts?: { inlineData?: { data?: string; mimeType?: string } }[] };
@@ -89,6 +89,7 @@ export async function generateGeminiMockup(
       }[];
       promptFeedback?: { blockReason?: string };
     };
+    clearTimeout(timeoutId);
 
     if (result.promptFeedback?.blockReason) {
       throw new Error(`Gemini blocked the request: ${result.promptFeedback.blockReason}`);

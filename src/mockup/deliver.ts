@@ -22,6 +22,10 @@ import { commitFreeGeneration, releaseReservation } from "./quota.js";
 import { notifyAdminsText } from "../admin/notify.js";
 import { sendMedia } from "../whatsapp/metaClient.js";
 import { fetchMetaMediaBuffer } from "../whatsapp/media.js";
+import { withTimeout } from "../shared/withTimeout.js";
+
+/** Hard cap on each Vercel Blob `put` so a hung upload can't eat the worker budget. */
+const BLOB_PUT_TIMEOUT_MS = 20_000;
 
 /** Extracts the numeric or string WhatsApp chat id. */
 function extractWhatsAppChatId(customerChatId: string): string | null {
@@ -193,12 +197,14 @@ export async function deliverMockupForOrder(
   try {
     validateLogoCount(order.logos.length);
 
-    const logoBuffers: Buffer[] = [];
-    for (const logo of order.logos) {
-      const buffer = await fetchLogo(logo.fileId);
-      validateLogoFile(guessMimeTypeFromBuffer(buffer), buffer.length);
-      logoBuffers.push(buffer);
-    }
+    // Logos download in parallel (order preserved by Promise.all).
+    const logoBuffers: Buffer[] = await Promise.all(
+      order.logos.map(async (logo) => {
+        const buffer = await fetchLogo(logo.fileId);
+        validateLogoFile(guessMimeTypeFromBuffer(buffer), buffer.length);
+        return buffer;
+      }),
+    );
 
     const assignments: LogoAssignment[] = order.logos.map((logo, i) => ({
       logoIndex: i,
@@ -219,9 +225,13 @@ export async function deliverMockupForOrder(
     const stored: { view: MockupView; buffer: Buffer; url: string; pathname: string; costUsd?: number }[] = [];
     for (const result of results) {
       const pathname = `mockups/${order.orderId}/${result.view}.png`;
-      const uploaded = blobUploader
-        ? await uploadMockupImage(pathname, result.buffer, "image/png", blobUploader)
-        : await uploadMockupImage(pathname, result.buffer, "image/png");
+      const uploaded = await withTimeout(
+        blobUploader
+          ? uploadMockupImage(pathname, result.buffer, "image/png", blobUploader)
+          : uploadMockupImage(pathname, result.buffer, "image/png"),
+        BLOB_PUT_TIMEOUT_MS,
+        `Blob upload of ${pathname}`,
+      );
       stored.push({
         view: result.view,
         buffer: result.buffer,

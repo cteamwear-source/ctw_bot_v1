@@ -728,21 +728,21 @@ async function processStep(ctx: WhatsAppContext, draft: OrderDraft, step: string
         const freeText = remaining > 0
           ? `🎨 You have **${remaining} free mockup preview${remaining === 1 ? "" : "s"}** remaining this month. Generating your preview on the T-Shirt now — one moment…`
           : `🎨 Generating your preview on the T-Shirt now — one moment…`;
-        await sendMessage(chatId, freeText);
+        await sendMessage(chatId, `${freeText}\n\n${COPY.mockupArrivingShortly}`);
 
-        // 2. Deliver the mockup & persist final order snapshot
-        const order = assembleOrderData(chatId, draft);
-        await saveOrderSnapshot(order).catch(() => {});
+        // 2. Quote, QR and pay message go out at once; the payment screen
+        // saves the order snapshot (once) after its sends.
+        await saveDraft(chatId, draft);
+        await promptNext(chatId, draft);
+
+        // 3. Hand the mockup to the /api/mockup-delivery worker (waits for the
+        // 202 only). Quota + AI/Sharp generation run there, never here.
         try {
           const { triggerMockupDelivery } = await import("../mockup/deliverTrigger.js");
-          await triggerMockupDelivery(order.orderId);
+          await triggerMockupDelivery(draft.orderId);
         } catch (deliveryErr) {
-          console.error(`[mockupDecision] triggerMockupDelivery error for ${order.orderId}:`, deliveryErr);
+          console.error(`[mockupDecision] triggerMockupDelivery error for ${draft.orderId}:`, deliveryErr);
         }
-        
-        // 3. Final step: store all the values for the order and prompt for payment
-        await saveDraft(chatId, draft, true);
-        await promptNext(chatId, draft);
       } else if (input === "mockup:skip" || lowerMockup.includes("skip") || lowerMockup === "2" || lowerMockup === "no") {
         draft.mockupDecision = "skip";
         
