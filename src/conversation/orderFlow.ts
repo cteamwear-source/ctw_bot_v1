@@ -20,6 +20,7 @@ import { nextOrderId } from "../session/orderId.js";
 import { triggerMockupDelivery } from "../mockup/deliverTrigger.js";
 import { peekUsage } from "../mockup/quota.js";
 import { generateUpiQrPng } from "../qr/index.js";
+import { uploadMockupImage, isBlobStorageConfigured } from "../storage/blob.js";
 import { getEnv } from "../config/env.js";
 import { saveOrderSnapshot } from "../session/orderStore.js";
 import { renderQuoteCard } from "../shared/render.js";
@@ -992,24 +993,41 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false)
 
       // ---- S11 Payment ----
       const quoteText = renderQuoteCard(order);
+      const env = getEnv();
       await sendMessage(chatId, quoteText).catch((err) => {
         console.error(`[promptNext:payment] Failed to send quoteText:`, err);
       });
 
-      // To satisfy tests:
-      const env = getEnv();
-      if (false) {
-        generateUpiQrPng(env.MERCHANT_VPA, 1000, draft.orderId!);
-        triggerMockupDelivery(order.orderId);
+      // Generate dynamic UPI QR with real advanceDue and orderId, upload to Blob
+      let qrUrl: string;
+      try {
+        const qrBuffer = await generateUpiQrPng(env.MERCHANT_VPA, order.advanceDue, order.orderId);
+        if (isBlobStorageConfigured()) {
+          const uploadResult = await uploadMockupImage(`payment-qr/${order.orderId}.png`, qrBuffer, "image/png");
+          qrUrl = uploadResult.url;
+        } else {
+          // Blob not configured — fall back to static QR (if valid) or throw
+          qrUrl = env.STATIC_QR_URL && !env.STATIC_QR_URL.includes("drive.google.com")
+            ? env.STATIC_QR_URL
+            : "";
+          if (!qrUrl) throw new Error("BLOB_READ_WRITE_TOKEN not set and STATIC_QR_URL is invalid");
+        }
+      } catch (err) {
+        console.error("[promptNext:payment] Dynamic QR generation/upload failed, using static fallback:", err);
+        qrUrl = env.STATIC_QR_URL && !env.STATIC_QR_URL.includes("drive.google.com")
+          ? env.STATIC_QR_URL
+          : "";
+        // If we still have no URL, this is a config error but we continue with a placeholder
+        // to avoid blocking the flow (the customer will see a broken image).
       }
 
-      const qrUrl =
-        env.STATIC_QR_URL && !env.STATIC_QR_URL.includes("drive.google.com")
-          ? env.STATIC_QR_URL
-          : "https://bkxivup64ugazlbe.public.blob.vercel-storage.com/payment-qr.jpg";
-      await sendMedia(chatId, qrUrl, "Scan & pay with any UPI app").catch((err) => {
-        console.error(`[promptNext:payment] Failed to send QR image:`, err);
-      });
+      if (qrUrl) {
+        await sendMedia(chatId, qrUrl, "Scan & pay with any UPI app").catch((err) => {
+          console.error(`[promptNext:payment] Failed to send QR image:`, err);
+        });
+      } else {
+        await sendMessage(chatId, "⚠️ Payment QR could not be generated — please contact support.").catch(() => {});
+      }
       
       const payMessage = "Thank you! You can make your payment by scanning the QR code above.\n\nOnce done, please send a screenshot of your payment here.";
       
