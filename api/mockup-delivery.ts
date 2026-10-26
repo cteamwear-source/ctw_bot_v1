@@ -44,7 +44,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const env = getEnv();
   // Fail-closed: this endpoint is gated by its OWN dedicated secret. We do NOT
   // fall back to META_WEBHOOK_SECRET here — that would mean a leaked webhook
-  // secret also lets an attacker trigger our OpenRouter / Gemini generations.
+  // secret also lets an attacker trigger our OpenAI / Gemini generations.
   // See audit finding C4 (docs/superpowers/specs/2026-10-06-emovur-integration-design.md).
   if (!env.INTERNAL_MOCKUP_SECRET) {
     console.error(

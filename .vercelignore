@@ -6,3 +6,21 @@ scripts/
 audit.json
 node_modules/
 .git/
+# Local secrets: never upload env files in CLI deployments (Vercel only
+# ignores .env.local / .env.*.local by default). Set secrets in the Vercel
+# project settings instead.
+.env
+.env.*
+!.env.example
+# Local tooling / scratch output
+.agents/
+.claude/
+.kilo/
+.kiro/
+.worktrees/
+agent/
+mockup-test-output/
+test_mockups_sports/
+test-mockup-output-*.png
+HANDOVER.md
+plan.md

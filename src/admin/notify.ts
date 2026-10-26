@@ -71,7 +71,9 @@ export async function notifyAdmins(order: OrderData, screenshotUrlOrId: string):
 /** Sends a plain-text notification to all admin chats and logs it. */
 export async function notifyAdminsText(text: string): Promise<void> {
   const env = getEnv();
-  console.log(`[notifyAdminsText] Escalation/Notice: ${text}`);
+  // Never log approval codes or token-bearing portal URLs (Vercel logs are
+  // readable by everyone on the project, and are retained).
+  console.log(`[notifyAdminsText] Escalation/Notice: ${redactForLog(text)}`);
 
   for (const adminChatId of env.ADMIN_CHAT_IDS) {
     try {
@@ -80,4 +82,12 @@ export async function notifyAdminsText(text: string): Promise<void> {
       console.warn(`[notifyAdminsText] Failed to send text to admin ${adminChatId}:`, err);
     }
   }
+}
+
+/** Strips approval codes and URL tokens from a message before it is logged. */
+export function redactForLog(text: string): string {
+  return text
+    .replace(/([?&]token=)[^&\s)]+/gi, "$1[redacted]")
+    .replace(/`\d{6}`/g, "`[code]`")
+    .replace(/(\bcode\b[^\d\n]{0,20})\d{6}\b/gi, "$1[code]");
 }

@@ -69,7 +69,7 @@ src/
                         waitHelpers.ts, steps/{catalogSelection,sizeSplit}.ts
   mockup/               composite, zones, garmentReference, workflow, quota, generationStore,
                         paidGeneration, deliver, deliverTrigger, customerNotify, rateLimit,
-                        generateAi/imageProvider/{gemini,openrouter}Client, promptBuilder, generate (legacy)
+                        generateAi/imageProvider/{gemini,openai}Client, promptBuilder, generate (legacy)
   pricing/              priceBook.ts (data) + index.ts (pure math)
   qr/                   UPI URI + 512px PNG generation
   session/              redisClient, redisStorageAdapter, chatLock, dedupe, draftStore,
@@ -214,3 +214,37 @@ npm run set-webhook / delete-webhook / webhook-info
   on `/api/health` for deploy-lag checks).
 - **Admin action:** follow `src/admin/actions.ts` patterns — parse order/generation
   id from callback data, gate by `ADMIN_CHAT_IDS`, SETNX idempotency.
+
+## Latest inspection findings (2026-10-26)
+
+These are the concrete contracts discovered from recent source reads; keep them in
+mind so agents don't re-derive them.
+
+- **Build info** (`src/config/version.ts`):
+  - `BUILD_STAMP = "2026-10-26-updated-mockup-templates"`
+  - `BuildInfo = {buildStamp, commitSha, commitRef, commitMessage, features: {catalogColourFlow, fiftyPercentAdvance, deterministicMockup, mockupBeforePayment}}` (all features `true` in this release). VERCEL injects `VERCEL_GIT_COMMIT_SHA/REF/MSG`.
+- **Env (`src/config/env.ts`)**: validate once at cold start via `getEnv()`. Required:
+  `META_API_TOKEN`, `META_PHONE_NUMBER_ID`, `META_BUSINESS_ACCOUNT_ID`,
+  `META_WEBHOOK_SECRET`, `REDIS_REST_URL`, `REDIS_REST_TOKEN`, `ADMIN_CHAT_IDS`,
+  `MOCKUP_FREE_PER_MONTH`, `MOCKUP_PAID_PRICE_INR`, `MERCHANT_VPA`.
+  - `META_API_BASE_URL` defaults to `https://graph.facebook.com`; may carry a Tech
+    Provider override (e.g. Emovur), built as `${META_API_BASE_URL}/${META_PHONE_NUMBER_ID}/messages`; must be HTTPS; strips trailing slashes.
+  - `META_APP_SECRET` optional; used for `X-Hub-Signature-256` HMAC verification.
+- **Shared types** (`src/shared/types.ts`): `LogoUpload = {fileId, placement}`;
+  `CatalogSelection = {catalogVersion, tier, groupId, groupLabel, itemId, itemLabel, productId, garmentType, sourceId, sourcePage, styleCode?, variantId?, colorName?, colorCode?}`;
+  `ReferenceImageKind = "rendered-page" | "external-link" | "placeholder"`.
+- **Pricing data** (`src/pricing/priceBook.ts`, data only):
+  - `Tier = "basic" | "standard" | "branded"`; `ProductId` =
+    `"dry_fit_round_neck" | "dry_fit_polo" | "cotton_round_neck" | "cotton_polo"`
+    (see `PRODUCT_SILHOUETTE`: `silhouetteByProductId`);
+  - `Silhouette = "round_neck" | "polo"`;
+  - `ProductCatalogEntry = {id, label: Record<Tier,string>, rates: Record<Tier,[number,number]>, ex-GST}`;
+  - `TIER_LABELS`, `TIER_PITCH`, `TIER_FROM_RATE = [169, 219, 499]` (basic/standard/branded ex-GST).
+- **Render helpers** (`src/shared/render.ts`): `placementLabel`, `formatRupees`
+  (`₹${n.toLocaleString("en-IN")}`), `sizeSplitLine`, `catalogSelectionLine` (🎽 Selected: ...), `catalogSelectionAdminLine`. These render both cards.
+- **Order flow** (`src/conversation/orderFlow.ts`): `WhatsAppContext = {chatId, message, input}`,
+  exports `handleWhatsAppMessage(chatId, message)`; imports follow the pattern shown above.
+- **Session modules confirmed**: `draftStore` (in-memory + Redis, 24h),
+  `orderStore` (full snapshot, `order:<orderId>` 14d), `statusMachine` (forward-only transitions),
+  `orderId` (`oid:<YYMMDD>` INCR → `CTW-YYMMDD-nn`), `chatLock` (`busy:<chatId>` 90s),
+  `dedupe` (`upd:<updateId>` 24h), `rateLimit` (flood control ~20 msg/60s per chat).

@@ -8,8 +8,8 @@
  * CRON_SECRET: when the env var is set in Vercel project settings, Vercel
  * automatically sends `Authorization: Bearer ${CRON_SECRET}` with every
  * cron request, and we require a timing-safe match (fail-closed-if-
- * configured). When CRON_SECRET is NOT set the endpoint stays permissive
- * so existing deployments keep working, but it logs a prominent warning
+ * configured). When CRON_SECRET is NOT set, production (VERCEL_ENV=production)
+ * refuses with 503; other environments stay permissive but log a prominent warning
  * on every invocation and reports `authConfigured: false` in the response.
  *
  * Deliberately NOT accepted as an auth signal: Vercel's `x-vercel-cron: 1`
@@ -51,8 +51,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
-  // Permissive fallback so existing deployments don't break — but make the
-  // exposure impossible to miss in the logs and in the response payload.
+  // Production fails closed: an open endpoint lets anyone spam every admin
+  // WhatsApp number (and bill outbound messages) on demand.
+  if (process.env.VERCEL_ENV === "production") {
+    console.error(
+      "[heartbeat] SECURITY: CRON_SECRET is not set in production — refusing. " +
+        "Set CRON_SECRET in the Vercel project settings; Vercel then sends it with cron requests automatically.",
+    );
+    res.status(503).send("Heartbeat authentication not configured");
+    return;
+  }
+
+  // Non-production permissive fallback — make the exposure impossible to
+  // miss in the logs and in the response payload.
   console.warn(
     "[heartbeat] SECURITY WARNING: CRON_SECRET is not set — /api/heartbeat is UNAUTHENTICATED. " +
       "Anyone who discovers this URL can trigger admin pings at will. " +

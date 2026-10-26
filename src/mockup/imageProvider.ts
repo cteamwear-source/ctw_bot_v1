@@ -26,6 +26,6 @@ export async function generateMockupImage(
   if (provider === "gemini") {
     return generateGeminiMockup(input);
   }
-  // Default and direct provider is OpenAI (OpenRouter is explicitly not used)
+  // Default provider is OpenAI.
   return generateOpenAiMockup(input);
 }

@@ -2,9 +2,16 @@ import { getEnv } from "../config/env.js";
 import { uploadMockupImage, isBlobStorageConfigured } from "../storage/blob.js";
 
 const MEDIA_FETCH_TIMEOUT_MS = 15000;
+/** Upper bound for any customer media we download (logos ≤8 MB, proofs are screenshots). */
+const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
 
 /** Download binary file from WhatsApp Cloud API (or Tech Provider) using Media ID with timeout */
 export async function fetchMetaMediaBuffer(fileId: string): Promise<Buffer> {
+  // Media ids are interpolated into a URL that is called with our bearer
+  // token — only accept plain id characters (no "/", "?", "..").
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(fileId)) {
+    throw new Error("Invalid WhatsApp media id");
+  }
   const env = getEnv();
   const headers: Record<string, string> = {
     Authorization: `Bearer ${env.META_API_TOKEN}`,
@@ -54,7 +61,17 @@ export async function fetchMetaMediaBuffer(fileId: string): Promise<Buffer> {
       const errText = await response.text().catch(() => "");
       throw new Error(`Failed to download WhatsApp media file (${response.status}): ${errText}`);
     }
+    // Customers control what they upload (documents can be up to 100 MB on
+    // WhatsApp). Refuse oversized media before buffering it in memory.
+    const declared = Number(response.headers.get("content-length") ?? "");
+    if (Number.isFinite(declared) && declared > MAX_MEDIA_BYTES) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error(`WhatsApp media too large (${declared} bytes; limit ${MAX_MEDIA_BYTES})`);
+    }
     const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > MAX_MEDIA_BYTES) {
+      throw new Error(`WhatsApp media too large (${arrayBuffer.byteLength} bytes; limit ${MAX_MEDIA_BYTES})`);
+    }
     return Buffer.from(arrayBuffer);
   } catch (err) {
     clearTimeout(timeoutId);

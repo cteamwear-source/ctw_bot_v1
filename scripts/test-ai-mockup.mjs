@@ -6,9 +6,9 @@
  *   set GEMINI_API_KEY=AIza...
  *   node scripts/test-ai-mockup.mjs <path-to-logo-image> [placement] [product]
  *
- * Usage (OpenRouter instead):
- *   set MOCKUP_IMAGE_PROVIDER=openrouter
- *   set OPENROUTER_API_KEY=sk-or-v1-...
+ * Usage (OpenAI instead):
+ *   set MOCKUP_IMAGE_PROVIDER=openai
+ *   set OPENAI_API_KEY=sk-...
  *   node scripts/test-ai-mockup.mjs <path-to-logo-image> [placement] [product]
  *
  * placement: left_chest | center_front | upper_back | sleeve (default: left_chest)

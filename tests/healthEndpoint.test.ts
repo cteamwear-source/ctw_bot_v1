@@ -29,7 +29,7 @@ function applyEnv(): void {
   process.env.ADMIN_EMAIL_FROM = TEST_ADMIN_EMAIL_FROM;
   process.env.OPENAI_API_KEY = TEST_OPENAI_KEY;
   process.env.INTERNAL_MOCKUP_SECRET = TEST_INTERNAL_SECRET;
-  process.env.MOCKUP_IMAGE_PROVIDER = "openrouter";
+  process.env.MOCKUP_IMAGE_PROVIDER = "gemini";
   process.env.MOCKUP_IMAGE_MODEL = "test-model";
 }
 
@@ -133,7 +133,7 @@ test("health: default GET keeps deploy-lag diagnostics but leaks no emails, key 
   assert.equal(envStatus.adminEmailFromConfigured, true, "sender reduced to a boolean");
   assert.equal(envStatus.hasOpenAiApiKey, true);
   assert.equal(envStatus.hasInternalMockupSecret, true);
-  assert.equal(envStatus.mockupImageProvider, "openrouter");
+  assert.equal(envStatus.mockupImageProvider, "gemini");
   assert.equal(envStatus.mockupImageModel, "test-model");
 
   // No value-bearing fields may exist at all.

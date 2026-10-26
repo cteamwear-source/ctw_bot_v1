@@ -1,7 +1,8 @@
+import crypto from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { verifyPortalToken, getPortalUrl, getResendOtpUrl } from "../src/admin/approvalToken.js";
 import {
-  verifyAndConsumeApprovalCode,
+  verifyAndConsumeApprovalCodeFor,
   resendApprovalCode,
 } from "../src/admin/approvalCode.js";
 import {
@@ -36,11 +37,80 @@ function parseBody(req: VercelRequest): Record<string, any> {
   return {};
 }
 
+interface FreshCodeResult {
+  ok: boolean;
+  /** True when the code reached the admin inbox (vs. WhatsApp fallback). */
+  viaEmail?: boolean;
+  message: string;
+  cooldownRemaining?: number;
+}
+
+/**
+ * Issues a fresh approval code and delivers it to admins out-of-band
+ * (email, or admin WhatsApp when email is unconfigured/failing). The code
+ * is never returned to the caller: holding the portal link alone must not
+ * be enough to confirm a payment.
+ */
+async function issueFreshCode(orderId: string, token: string): Promise<FreshCodeResult> {
+  const resend = await resendApprovalCode("order", orderId);
+  if (!resend.ok || !resend.code) {
+    if (resend.limitReached) {
+      return { ok: false, message: "⛔ Daily limit for new codes reached for this order. Use the code already sent, or try again tomorrow." };
+    }
+    return {
+      ok: false,
+      cooldownRemaining: resend.cooldownRemaining,
+      message: `⏳ Please wait ${resend.cooldownRemaining ?? 30}s before generating another code.`,
+    };
+  }
+
+  const portalUrl = getPortalUrl(orderId, token);
+  const emailRes = await sendSecondaryOtpEmail(orderId, resend.code, portalUrl);
+  if (emailRes.ok && !emailRes.simulated) {
+    return { ok: true, viaEmail: true, message: "✅ Secondary verification code sent to admin email! Please check your inbox and enter it below." };
+  }
+
+  // CB-02 + invariant #3: email not configured or failed → never silent;
+  // fan the code out to admin WhatsApp instead.
+  const reason = emailRes.simulated ? "email not configured" : "email delivery failed";
+  console.warn(`[admin-approve] Secondary code for ${orderId} not emailed (${reason}); sending via admin WhatsApp`);
+  await notifyAdminsText(
+    `🔐 *Secondary Approval Code for Order ${orderId}* (${reason} — sent here)\n\n` +
+      `Code: \`${resend.code}\` (Valid 30 mins)`,
+  ).catch(() => {});
+  return { ok: true, viaEmail: false, message: `⚠️ The new code could not be emailed (${reason}). It was sent to the admin WhatsApp numbers instead.` };
+}
+
+/** Headers for every portal response: the page carries a bearer-like token in its URL. */
+function setSecurityHeaders(res: VercelResponse, nonce: string): void {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-Robots-Tag", "noindex, nofollow");
+  res.setHeader(
+    "Content-Security-Policy",
+    [
+      "default-src 'none'",
+      `script-src 'nonce-${nonce}'`,
+      "style-src 'unsafe-inline'",
+      "img-src https: data:",
+      "connect-src 'self'",
+      "form-action 'self'",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+    ].join("; "),
+  );
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const method = req.method?.toUpperCase() || "GET";
+  const nonce = crypto.randomBytes(16).toString("base64");
+  setSecurityHeaders(res, nonce);
 
   if (method === "GET") {
-    return handleGet(req, res);
+    return handleGet(req, res, nonce);
   } else if (method === "POST") {
     return handlePost(req, res);
   } else {
@@ -49,7 +119,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 }
 
-async function handleGet(req: VercelRequest, res: VercelResponse) {
+async function handleGet(req: VercelRequest, res: VercelResponse, nonce: string) {
   const orderId = String(req.query.orderId || "").trim();
   const token = String(req.query.token || "").trim();
   const action = String(req.query.action || "").trim();
@@ -66,38 +136,8 @@ async function handleGet(req: VercelRequest, res: VercelResponse) {
   // Handle direct link for secondary OTP generation: ?action=resend_otp
   let banner: { type: "success" | "info" | "warning"; message: string } | null = null;
   if (action === "resend_otp") {
-    const resend = await resendApprovalCode("order", orderId);
-    if (resend.ok && resend.code) {
-      const emailRes = await sendSecondaryOtpEmail(orderId, resend.code, getPortalUrl(orderId, token));
-      if (emailRes.simulated) {
-        // CB-02: no API key → nothing was emailed. Put the code in front of the admin
-        // here AND fan out on WhatsApp so the money event is never silent.
-        await notifyAdminsText(
-          `🔐 *Secondary Approval Code for Order ${orderId}* (email not configured — sent here)\n\n` +
-          `Code: \`${resend.code}\` (Valid 30 mins)\n` +
-          `👉 *Web Portal:* ${getPortalUrl(orderId, token)}`
-        ).catch(() => {});
-        banner = {
-          type: "warning",
-          message: `⚠️ Verification code generated [ ${resend.code} ], but email is not configured (RESEND_API_KEY missing) — it was NOT emailed. Use the code shown here or from admin WhatsApp.`,
-        };
-      } else if (!emailRes.ok) {
-        banner = {
-          type: "warning",
-          message: `⚠️ Verification code generated [ ${resend.code} ], but email delivery failed: ${emailRes.error}. (Note: Resend test mode only delivers to the registered account email).`,
-        };
-      } else {
-        banner = {
-          type: "success",
-          message: "✅ A fresh 6-digit verification code has been dispatched to your email! Please check your inbox and enter it below.",
-        };
-      }
-    } else {
-      banner = {
-        type: "info",
-        message: `⏳ Please wait ${resend.cooldownRemaining ?? 30}s before generating another code.`,
-      };
-    }
+    const result = await issueFreshCode(orderId, token);
+    banner = { type: result.ok ? (result.viaEmail ? "success" : "warning") : "info", message: result.message };
   }
 
   // Load order data
@@ -110,6 +150,7 @@ async function handleGet(req: VercelRequest, res: VercelResponse) {
     order,
     processedAction,
     banner,
+    nonce,
   }));
 }
 
@@ -130,43 +171,13 @@ async function handlePost(req: VercelRequest, res: VercelResponse) {
 
   // 1. Resend OTP action
   if (action === "resend_otp") {
-    const resend = await resendApprovalCode("order", orderId);
-    if (!resend.ok) {
-      return res.status(429).json({
-        ok: false,
-        error: `Please wait ${resend.cooldownRemaining}s before requesting a new code.`,
-        cooldownRemaining: resend.cooldownRemaining,
-      });
+    const result = await issueFreshCode(orderId, token);
+    if (!result.ok) {
+      return res.status(429).json({ ok: false, error: result.message, cooldownRemaining: result.cooldownRemaining });
     }
-
-    const portalUrl = getPortalUrl(orderId, token);
-    const emailRes = await sendSecondaryOtpEmail(orderId, resend.code!, portalUrl);
-
-    // CB-02: simulated dispatch (RESEND_API_KEY unset) delivered nothing — never
-    // report "sent to admin email" for it. Fan the code out on WhatsApp instead.
-    if (emailRes.simulated) {
-      await notifyAdminsText(
-        `🔐 *Secondary Approval Code for Order ${orderId}* (email not configured — sent here)\n\n` +
-        `Code: \`${resend.code!}\` (Valid 30 mins)\n` +
-        `👉 *Web Portal:* ${portalUrl}`
-      ).catch(() => {});
-      return res.status(502).json({
-        ok: false,
-        error: `Code generated, but email is not configured (RESEND_API_KEY missing) — it was NOT emailed. Sent to admin WhatsApp instead. Code: ${resend.code}`,
-      });
-    }
-
-    if (!emailRes.ok) {
-      return res.status(502).json({
-        ok: false,
-        error: `Code generated, but email delivery failed: ${emailRes.error}`,
-      });
-    }
-
-    return res.status(200).json({
-      ok: true,
-      message: "Secondary verification code sent to admin email! Please check your inbox.",
-    });
+    // The code itself is NEVER returned to the browser: whoever holds the
+    // portal link must still prove access to the admin inbox / WhatsApp.
+    return res.status(200).json({ ok: true, message: result.message });
   }
 
   // 2. Payment Issue action
@@ -217,18 +228,19 @@ async function handlePost(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    const pending = await verifyAndConsumeApprovalCode(code);
-    if (!pending) {
+    // Checked against THIS order's active code only, with a failed-attempt
+    // cap (brute-force protection) — see verifyAndConsumeApprovalCodeFor.
+    const verdict = await verifyAndConsumeApprovalCodeFor("order", orderId, code);
+    if (verdict === "locked") {
+      return res.status(429).json({
+        ok: false,
+        error: "Too many incorrect codes. This code has been disabled — use 'Request Secondary OTP' to get a new one.",
+      });
+    }
+    if (verdict !== "ok") {
       return res.status(400).json({
         ok: false,
         error: "Verification code is invalid or has expired (valid for 30 minutes). Please use 'Request Secondary OTP' to receive a new code.",
-      });
-    }
-
-    if (pending.id !== orderId) {
-      return res.status(400).json({
-        ok: false,
-        error: `Verification code does not match order ${orderId}.`,
       });
     }
 
@@ -288,10 +300,12 @@ interface PortalRenderProps {
   order: any | null;
   processedAction: string | null;
   banner: { type: string; message: string } | null;
+  /** CSP nonce for the single inline script. */
+  nonce: string;
 }
 
 function renderPortalHtml(props: PortalRenderProps): string {
-  const { orderId, token, order, processedAction, banner } = props;
+  const { orderId, token, order, processedAction, banner, nonce } = props;
   const env = getEnv();
   const adminEmailsText = env.ADMIN_EMAILS.join(", ");
   const isProcessed = Boolean(processedAction);
@@ -789,7 +803,7 @@ function renderPortalHtml(props: PortalRenderProps): string {
     </div>
   </div>
 
-  <script>
+  <script nonce="${escapeHtml(nonce)}">
     const orderId = ${jsonForScript(orderId)};
     const token = ${jsonForScript(token)};
     

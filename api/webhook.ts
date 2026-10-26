@@ -6,13 +6,15 @@
  * docs/superpowers/specs/2026-10-06-emovur-integration-design.md):
  *
  *  - GET handshake: standard Meta hub.verify_token echo.
- *  - POST verification: when META_APP_SECRET is set, HMAC-SHA256 of the raw
- *    body is computed and compared against the X-Hub-Signature-256 header
- *    using timingSafeEqual. Missing / mismatched signature -> 401, never 200.
- *    When META_APP_SECRET is unset (cold-start setup window, common when a
- *    Tech Provider doesn't share it), a single WARN per cold start is logged
- *    and POSTs are accepted without verification. Set META_APP_SECRET as
- *    soon as the Meta App Secret is available.
+ *  - POST verification (see authenticateWebhookPost):
+ *      * META_APP_SECRET set → HMAC-SHA256 of the raw body must match the
+ *        X-Hub-Signature-256 header (timingSafeEqual). Mismatch → 401.
+ *      * else META_WEBHOOK_URL_TOKEN set → the webhook URL registered with
+ *        the Tech Provider must carry `?token=<value>`. Mismatch → 401.
+ *      * neither set → 503 in production (fail closed: admin actions are
+ *        authorised by sender phone, so unsigned POSTs would let anyone
+ *        impersonate an admin). Local/preview only: accepted with a WARN.
+ *  - Bodies over 1 MB → 413.
  *  - Logging: never the raw body or headers. We log a structured summary
  *    with message-id / sender-id (masked) / type / timestamp / phone-id only.
  *
@@ -122,9 +124,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const challenge = req.query["hub.challenge"];
     const env = getEnv();
 
-    if (mode === "subscribe" && token === env.META_WEBHOOK_SECRET) {
+    if (mode === "subscribe" && typeof token === "string" && secretsMatch(token, env.META_WEBHOOK_SECRET)) {
       console.log("[webhook] handshake verified");
-      res.status(200).send(challenge);
+      // Echo only a plain challenge value (Meta sends digits) — never reflect
+      // arbitrary markup back to a browser.
+      const safeChallenge = typeof challenge === "string" ? challenge.replace(/[^A-Za-z0-9_-]/g, "") : "";
+      res.status(200).setHeader("Content-Type", "text/plain; charset=utf-8").send(safeChallenge);
       return;
     }
     res.status(403).send("Forbidden");
@@ -136,26 +141,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
-  // POST: read exact raw bytes (HMAC needs byte-exact body).
+  // POST: read exact raw bytes (HMAC needs byte-exact body), capped in size.
   const rawBody = await readRawBody(req);
+  if (rawBody === TOO_LARGE) {
+    console.warn("[webhook] rejected POST: body exceeds size limit");
+    res.status(413).send("Payload Too Large");
+    return;
+  }
   if (rawBody === null) {
     res.status(400).send("Bad Request");
     return;
   }
 
   const env = getEnv();
-  if (env.META_APP_SECRET) {
-    const sig = headerString(req.headers || {}, "x-hub-signature-256");
-    if (!verifyMetaSignature(rawBody, sig, env.META_APP_SECRET)) {
-      console.warn("[webhook] rejected POST: invalid or missing X-Hub-Signature-256");
-      res.status(401).send("Invalid signature");
+  const auth = authenticateWebhookPost(req, rawBody, env);
+  if (auth !== "ok") {
+    if (auth === "misconfigured") {
+      console.error(
+        "[webhook] SECURITY: refusing POST — neither META_APP_SECRET nor META_WEBHOOK_URL_TOKEN is set in production. " +
+          "Unauthenticated webhooks would let anyone forge messages from admin numbers. Set one of them and redeploy.",
+      );
+      res.status(503).send("Webhook authentication not configured");
       return;
     }
-  } else if (!signatureWarningLogged) {
-    signatureWarningLogged = true;
-    console.warn(
-      "[webhook] META_APP_SECRET is not set; webhook accepting unverified POSTs. Set META_APP_SECRET to enforce HMAC-SHA256 verification.",
-    );
+    console.warn(`[webhook] rejected POST: ${auth}`);
+    res.status(401).send("Unauthorized");
+    return;
   }
 
   let payload: unknown;
@@ -229,25 +240,89 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 }
 
+/** Meta webhook payloads are a few KB; anything this large is abuse. */
+const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
+const TOO_LARGE = Symbol("too-large");
+
+/** Constant-time string comparison (length mismatch → false). */
+function secretsMatch(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+type WebhookAuthResult = "ok" | "misconfigured" | "invalid or missing X-Hub-Signature-256" | "invalid or missing URL token";
+
+/**
+ * Authenticates an inbound POST.
+ *  1. META_APP_SECRET set → Meta's X-Hub-Signature-256 HMAC is required.
+ *  2. else META_WEBHOOK_URL_TOKEN set → `?token=` must match (for Tech
+ *     Providers that don't forward Meta's signature).
+ *  3. else → rejected in production; accepted with a one-time warning in
+ *     local/preview/test environments only.
+ */
+function authenticateWebhookPost(
+  req: VercelRequest,
+  rawBody: Buffer,
+  env: { META_APP_SECRET?: string; META_WEBHOOK_URL_TOKEN?: string },
+): WebhookAuthResult {
+  if (env.META_APP_SECRET) {
+    const sig = headerString(req.headers || {}, "x-hub-signature-256");
+    return verifyMetaSignature(rawBody, sig, env.META_APP_SECRET) ? "ok" : "invalid or missing X-Hub-Signature-256";
+  }
+  if (env.META_WEBHOOK_URL_TOKEN) {
+    const provided = req.query?.["token"];
+    return typeof provided === "string" && secretsMatch(provided, env.META_WEBHOOK_URL_TOKEN)
+      ? "ok"
+      : "invalid or missing URL token";
+  }
+  if (process.env.VERCEL_ENV === "production") return "misconfigured";
+  if (!signatureWarningLogged) {
+    signatureWarningLogged = true;
+    console.warn(
+      "[webhook] Neither META_APP_SECRET nor META_WEBHOOK_URL_TOKEN is set; accepting unverified POSTs (non-production only).",
+    );
+  }
+  return "ok";
+}
+
 /**
  * Read the raw HTTP request body as a Buffer (HMAC needs exact bytes).
  * Tries Vercel's `req.rawBody` first (newer @vercel/node versions), then
  * falls back to streaming the request — works either way regardless of
- * whether bodyParser has consumed the stream.
+ * whether bodyParser has consumed the stream. Returns TOO_LARGE once the
+ * body exceeds MAX_WEBHOOK_BODY_BYTES.
  */
-async function readRawBody(req: VercelRequest): Promise<Buffer | null> {
+async function readRawBody(req: VercelRequest): Promise<Buffer | null | typeof TOO_LARGE> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyReq = req as any;
-  if (anyReq.rawBody instanceof Buffer) return anyReq.rawBody;
-  if (typeof anyReq.rawBody === "string") return Buffer.from(anyReq.rawBody);
+  if (anyReq.rawBody instanceof Buffer || typeof anyReq.rawBody === "string") {
+    const buf = anyReq.rawBody instanceof Buffer ? anyReq.rawBody : Buffer.from(anyReq.rawBody);
+    return buf.length > MAX_WEBHOOK_BODY_BYTES ? TOO_LARGE : buf;
+  }
 
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
     req.on("data", (chunk: Buffer | string) => {
-      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      if (settled) return;
+      const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      size += buf.length;
+      if (size > MAX_WEBHOOK_BODY_BYTES) {
+        settled = true;
+        resolve(TOO_LARGE);
+        return;
+      }
+      chunks.push(buf);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", () => resolve(null));
+    req.on("end", () => {
+      if (!settled) resolve(Buffer.concat(chunks));
+    });
+    req.on("error", () => {
+      if (!settled) resolve(null);
+    });
   });
 }
 

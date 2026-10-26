@@ -1,14 +1,14 @@
 /**
  * Gemini API client — used for AI-rendered logo mockups (free tier: ~500
  * requests/day on gemini-2.5-flash-image / "Nano Banana", no credit card
- * required as of testing). Same architecture note as openrouterClient.ts
+ * required as of testing). Same architecture note as openaiClient.ts
  * applies: this is a scoped exception to tech.md's "no AI" principle,
  * used only for mockup visualization, not the deterministic order/pricing
  * pipeline. See docs/Mockup-Template-Generation.md.
  *
  * Free-tier caveat: Google can change or remove this tier without notice.
  * Kept behind the same MockupGenerationInput/Result shape as
- * openrouterClient.ts so switching provider later is a one-line config
+ * openaiClient.ts so switching provider later is a one-line config
  * change, not a rewrite (see src/mockup/imageProvider.ts).
  */
 

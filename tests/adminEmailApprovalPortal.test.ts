@@ -612,13 +612,17 @@ test("CB-02: admin-approve POST resend_otp reports honestly and WhatsAppes the c
     });
     await handler(req, res);
 
-    assert.equal(getStatusCode(), 502, "must not claim the code was emailed");
-    assert.equal(getData().ok, false);
-    assert.match(String(getData().error), /not configured/i);
+    assert.equal(getStatusCode(), 200);
+    assert.equal(getData().ok, true);
+    assert.match(String(getData().message), /not configured/i, "must say the email was not sent");
+    assert.match(String(getData().message), /WhatsApp/, "must say where the code went instead");
+    assert.ok(!/sent to admin email/i.test(String(getData().message)), "must not claim the code was emailed");
 
     const code = await getActiveApprovalCode("order", order.orderId);
     assert.ok(code);
-    assert.ok(String(getData().error).includes(code!), "error must surface the code so the admin can still use it");
+    // Security audit 2026-10-26: the portal link alone must never reveal the
+    // code — it is delivered out-of-band only.
+    assert.ok(!JSON.stringify(getData()).includes(String(code)), "response must NOT contain the code");
 
     assert.ok(
       whatsappBodies(calls).some((b) => b.includes(code!)),
@@ -650,12 +654,13 @@ test("CB-02: admin-approve GET resend_otp shows a warning banner and WhatsAppes 
 
     const html = String(getData());
     assert.ok(html.includes("banner-warning"), "must render a warning banner, not a success one");
-    assert.ok(html.includes("email is not configured"), "banner must say the email was not configured");
-    assert.ok(!html.includes("dispatched to your email"), "must not claim delivery");
+    assert.ok(html.includes("email not configured"), "banner must say the email was not configured");
+    assert.ok(!html.includes("sent to admin email"), "must not claim delivery");
 
     const code = await getActiveApprovalCode("order", order.orderId);
     assert.ok(code);
-    assert.ok(html.includes(code!), "banner must embed the fresh code");
+    // Security audit 2026-10-26: never render the code into the portal page.
+    assert.ok(!html.includes(String(code)), "banner must NOT embed the fresh code");
     assert.ok(
       whatsappBodies(calls).some((b) => b.includes(code!)),
       "fresh OTP must also fan out on WhatsApp",

@@ -21,8 +21,6 @@
  */
 
 import { getEnv } from "../config/env.js";
-import { loadOrderSnapshot } from "../session/orderStore.js";
-import { deliverMockupForOrder } from "./deliver.js";
 
 const TRIGGER_TIMEOUT_MS = 5_000; // just long enough to hand off the request; never blocks on generation itself
 
@@ -37,28 +35,16 @@ function resolveBaseUrl(): string {
 }
 
 /**
- * Dispatches mockup generation for the given order.
- * Attempts fast deterministic delivery in-process first so the user sees their
- * preview immediately before payment, and falls back to /api/mockup-delivery.
+ * Dispatches mockup generation for the given order to /api/mockup-delivery.
+ *
+ * SECURITY: generation must ALWAYS go through the worker, which calls
+ * startMockupGeneration() and therefore the monthly quota + ₹20 paid flow.
+ * An earlier "fast in-process" leg here called deliverMockupForOrder()
+ * directly, which skipped the quota reservation entirely (no decision was
+ * ever recorded, so commitFreeGeneration was a no-op): every customer got
+ * unlimited free (AI-billed) mockups. Do not reintroduce it.
  */
 export async function triggerMockupDelivery(orderId: string): Promise<void> {
-  // 1. In-process direct delivery (Sharp compositing takes ~150ms)
-  try {
-    const snapshot = await loadOrderSnapshot(orderId).catch(() => undefined);
-    if (snapshot && snapshot.logoReceived && snapshot.logos && snapshot.logos.length > 0) {
-      console.log(`[deliverTrigger] Executing fast delivery for ${orderId}`);
-      const outcome = await deliverMockupForOrder(snapshot);
-      if (outcome.delivered) {
-        console.log(`[deliverTrigger] Fast delivery succeeded for ${orderId}`);
-        return;
-      }
-      console.warn(`[deliverTrigger] Fast delivery returned not delivered for ${orderId}: ${outcome.reason}`);
-    }
-  } catch (err) {
-    console.warn(`[deliverTrigger] Fast in-process delivery error for ${orderId}, falling back to API:`, err);
-  }
-
-  // 2. Fallback to standalone background function.
   // CB-04: /api/mockup-delivery requires the DEDICATED INTERNAL_MOCKUP_SECRET
   // and fails closed (503) without it — it deliberately does NOT accept
   // META_WEBHOOK_SECRET, so sending the webhook secret here only ever

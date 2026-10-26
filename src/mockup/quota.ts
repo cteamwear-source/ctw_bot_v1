@@ -70,34 +70,48 @@ export function normalizePhoneForQuota(phone?: string): string | null {
   return digits.length >= 10 ? digits.slice(-10) : digits || null;
 }
 
-/** Numeric chat id from a "tg:<id>" prefixed field, or the raw string as a fallback bucket. */
-function chatBucket(customerChatId: string): string {
-  const match = /^tg:(\d+)$/.exec(customerChatId);
-  return match ? match[1] : customerChatId;
-}
-
 /**
- * Counter key: phone-based if phone provided, otherwise per-chat — BOTH are
- * month-keyed so the free allowance resets at the Asia/Kolkata month
- * boundary.
- *
- * CB-06: the phone key previously had NO month component
- * (`mockupquota:phone:<last10>`, 1-year rolling TTL refreshed on every
- * INCR), which made the "monthly" free allowance behave like an annual
- * per-phone allowance for active customers. Old-format keys are simply
- * orphaned by this change (their counters reset to zero for the current
- * month) — no migration, no paid record is lost.
+ * Stable per-sender bucket. Strips any (possibly repeated) "wa:"/"tg:"
+ * channel prefix and a leading "+", so "wa:9198…", "wa:wa:9198…" and
+ * "+9198…" all count against the same sender.
  */
-function quotaCounterKey(bucket: string, monthKey: string, phone?: string): string {
-  const clean = normalizePhoneForQuota(phone);
-  return clean
-    ? `mockupquota:phone:${clean}:${monthKey}`
-    : `mockupquota:freecommitted:${bucket}:${monthKey}`;
+function chatBucket(customerChatId: string): string {
+  return customerChatId.trim().replace(/^(?:(?:wa|tg):)+/i, "").replace(/^\+/, "");
 }
 
 /**
- * Bucket lock key (CB-07): mirrors quotaCounterKey's identity — phone-backed
- * when a phone is present, else per-chat — so every request that could touch
+ * Counter keys a generation is measured against — all month-keyed so the
+ * free allowance resets at the Asia/Kolkata month boundary (CB-06).
+ *
+ *  - The per-sender key is ALWAYS included. The sender (WhatsApp `from`)
+ *    is the authenticated identity; the typed contact phone is free text.
+ *    Counting only the typed phone (the old behaviour) let a customer get
+ *    unlimited free mockups by entering a different phone number per order.
+ *  - The typed-phone key is included too when present, so two chats that
+ *    share a contact phone still share one allowance.
+ *
+ * Usage = MAX over these counters; a free commit increments all of them.
+ */
+function quotaCounterKeys(bucket: string, monthKey: string, phone?: string): string[] {
+  const keys = [`mockupquota:freecommitted:${bucket}:${monthKey}`];
+  const clean = normalizePhoneForQuota(phone);
+  if (clean) keys.push(`mockupquota:phone:${clean}:${monthKey}`);
+  return keys;
+}
+
+async function readCommittedFree(redis: ReturnType<typeof getRedis>, keys: string[]): Promise<number> {
+  let max = 0;
+  for (const key of keys) {
+    const raw = await redis.get<number>(key);
+    const n = typeof raw === "number" ? raw : Number(raw ?? 0);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return max;
+}
+
+/**
+ * Bucket lock key (CB-07): phone-backed when a phone is present, else
+ * per-chat (see quotaCounterKeys) — so every request that could touch
  * the SAME counter serializes on the SAME lock (two chats sharing a phone
  * included).
  */
@@ -187,7 +201,7 @@ export async function reserveGeneration(
   const priceInr = computeMockupFee(views);
   const monthKey = kolkataMonthKey(at);
   const bucket = chatBucket(customerChatId);
-  const counterKey = quotaCounterKey(bucket, monthKey, phone);
+  const counterKeys = quotaCounterKeys(bucket, monthKey, phone);
 
   // Sticky decision: replay if this generationId was already decided.
   const existing = await redis.get<QuotaReservation>(decisionKey(generationId));
@@ -208,8 +222,7 @@ export async function reserveGeneration(
     const decided = await redis.get<QuotaReservation>(decisionKey(generationId));
     if (decided) return decided;
 
-    const committedRaw = await redis.get<number>(counterKey);
-    const committedFreeThisMonth = typeof committedRaw === "number" ? committedRaw : 0;
+    const committedFreeThisMonth = await readCommittedFree(redis, counterKeys);
 
     const free = committedFreeThisMonth < freeAllowance;
     const reservation: QuotaReservation = {
@@ -262,10 +275,13 @@ export async function commitFreeGeneration(
 
   const bucket = chatBucket(customerChatId);
   const monthKey = decision.monthKey || kolkataMonthKey(at);
-  const counterKey = quotaCounterKey(bucket, monthKey, phone);
-  await redis.incr(counterKey);
-  // Both counter variants are month-keyed (CB-06), so one TTL covers both.
-  await redis.expire(counterKey, MONTH_TTL_SECONDS);
+  // Every identity this generation was measured against is charged, so the
+  // per-sender counter advances even when the typed phone changes.
+  for (const counterKey of quotaCounterKeys(bucket, monthKey, phone)) {
+    await redis.incr(counterKey);
+    // All counter variants are month-keyed (CB-06), so one TTL covers them.
+    await redis.expire(counterKey, MONTH_TTL_SECONDS);
+  }
 }
 
 /**
@@ -304,9 +320,7 @@ export async function peekUsage(
   const env = getEnv();
   const monthKey = kolkataMonthKey(at);
   const bucket = chatBucket(customerChatId);
-  const counterKey = quotaCounterKey(bucket, monthKey, phone);
-  const raw = await redis.get<number>(counterKey);
-  const committedFreeThisMonth = typeof raw === "number" ? raw : 0;
+  const committedFreeThisMonth = await readCommittedFree(redis, quotaCounterKeys(bucket, monthKey, phone));
   return {
     committedFreeThisMonth,
     freeAllowance: env.MOCKUP_FREE_PER_MONTH,

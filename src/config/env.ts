@@ -53,6 +53,18 @@ export interface Env {
    * META_APP_SECRET as soon as practical.
    */
   META_APP_SECRET?: string;
+  /**
+   * Alternative inbound-webhook authenticator for Tech Providers that do not
+   * forward Meta's X-Hub-Signature-256 header. When set, the webhook URL
+   * registered with the provider must carry `?token=<META_WEBHOOK_URL_TOKEN>`
+   * and every POST without a timing-safe match is rejected with 401.
+   * Ignored when META_APP_SECRET is set (HMAC verification wins).
+   *
+   * In production (VERCEL_ENV=production) at least one of META_APP_SECRET /
+   * META_WEBHOOK_URL_TOKEN is REQUIRED: unauthenticated POSTs would let
+   * anyone forge messages "from" an admin phone number.
+   */
+  META_WEBHOOK_URL_TOKEN?: string;
   ADMIN_CHAT_IDS: string[];
   MERCHANT_VPA: string;
   STATIC_QR_URL: string;
@@ -62,7 +74,6 @@ export interface Env {
   SHEET_ID: string;
   SENTRY_DSN?: string;
   EMOVUR_CONNECTOR_ID?: string;
-  OPENROUTER_API_KEY?: string;
   OPENAI_API_KEY?: string;
   MOCKUP_IMAGE_MODEL?: string;
   GEMINI_API_KEY?: string;
@@ -126,7 +137,7 @@ export interface Env {
 }
 
 const DEFAULT_MOCKUP_PAID_PRICE_INR = 20;
-const DEFAULT_MOCKUP_FREE_PER_MONTH = 1;
+const DEFAULT_MOCKUP_FREE_PER_MONTH = 3;
 
 function optionalPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -173,6 +184,12 @@ export function getEnv(): Env {
   }
 
   const metaAppSecret = optional("META_APP_SECRET");
+  const webhookUrlToken = optional("META_WEBHOOK_URL_TOKEN")?.trim();
+  if (webhookUrlToken !== undefined && webhookUrlToken.length < 24) {
+    throw new Error(
+      "META_WEBHOOK_URL_TOKEN must be at least 24 characters (use a long random string, e.g. `openssl rand -hex 32`).",
+    );
+  }
 
   const adminEmailsRaw = process.env["ADMIN_EMAILS"] ?? "cteamwear@gmail.com";
   const adminEmails = adminEmailsRaw
@@ -203,6 +220,7 @@ export function getEnv(): Env {
     META_WEBHOOK_SECRET: required("META_WEBHOOK_SECRET"),
     META_API_BASE_URL: apiBaseUrl,
     META_APP_SECRET: metaAppSecret,
+    META_WEBHOOK_URL_TOKEN: webhookUrlToken,
     ADMIN_CHAT_IDS: adminChatIds,
     ADMIN_EMAILS: adminEmails.length > 0 ? adminEmails : ["cteamwear@gmail.com"],
     RESEND_API_KEY: optional("RESEND_API_KEY"),
@@ -217,7 +235,6 @@ export function getEnv(): Env {
     SHEET_ID: required("SHEET_ID"),
     SENTRY_DSN: optional("SENTRY_DSN"),
     EMOVUR_CONNECTOR_ID: optional("EMOVUR_CONNECTOR_ID"),
-    OPENROUTER_API_KEY: optional("OPENROUTER_API_KEY"),
     OPENAI_API_KEY: optional("OPENAI_API_KEY") ?? optional("OPENAI_API"),
     MOCKUP_IMAGE_MODEL: optional("MOCKUP_IMAGE_MODEL"),
     GEMINI_API_KEY: optional("GEMINI_API_KEY"),

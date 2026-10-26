@@ -44,7 +44,8 @@ export async function sendEmailWithResend(payload: SendEmailPayload): Promise<Em
     console.warn(
       `[email] RESEND_API_KEY is not configured — SIMULATED dispatch, NOT delivered to: ${payload.to.join(", ")}`,
     );
-    console.log(`[email] Simulated subject: ${payload.subject}`);
+    // Subjects can carry an approval code — never log it.
+    console.log(`[email] Simulated subject: ${payload.subject.replace(/\[\s*\d{6}\s*\]/g, "[ [code] ]")}`);
     return { ok: true, simulated: true, id: `mock-${Date.now()}` };
   }
 

@@ -4,7 +4,9 @@
  * characters from every sheet-bound string; cap name 60 / city 40 / phone 15.
  */
 
-const LEADING_FORMULA_CHARS = /^[=+\-@]+/;
+// Whitespace is included so " =HYPERLINK(...)" can't slip past: the value
+// is trimmed afterwards, which would otherwise expose the "=" again.
+const LEADING_FORMULA_CHARS = /^[\s=+\-@]+/;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\x00-\x1F\x7F]/g;
 

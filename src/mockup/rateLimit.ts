@@ -3,7 +3,7 @@
  *
  * This is deliberately separate from the general chat flood limiter
  * (src/session/rateLimit.ts) — AI mockup generation costs real money per
- * call (~$0.03-0.04/image via OpenRouter), so it needs its own, much
+ * call (paid per image via the AI provider), so it needs its own, much
  * stricter cap independent of ordinary message throughput. A user who
  * passes the chat flood check could still hammer this specific expensive
  * action without this guard.

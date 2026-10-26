@@ -157,6 +157,6 @@ The enhanced prompt flows through the existing mockup pipeline:
 1. Customer confirms colour in S03 of the conversation flow
 2. `resolveGarmentReference()` in `garmentReference.ts` returns a white template buffer + `GarmentDescriptor` with `colorName` (resolved via hex table)
 3. `buildMockupPrompt()` in `promptBuilder.ts` generates the AI instruction using the descriptor, printMethod, and assignment positions
-4. `generateAiMockups()` in `generateAi.ts` sends the prompt + white template buffer + logo buffers to the AI provider (Gemini or OpenRouter)
+4. `generateAiMockups()` in `generateAi.ts` sends the prompt + white template buffer + logo buffers to the AI provider (OpenAI or Gemini)
 5. The AI provider returns a rendered mockup image that preserves the garment type, colour, and fabric while adding the logo(s) at the specified placements
 6. The result is delivered to the customer via the existing mockup delivery system
