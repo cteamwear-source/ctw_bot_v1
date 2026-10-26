@@ -2,7 +2,7 @@
  * Mockup-generation rate limiting & abuse controls.
  *
  * This is deliberately separate from the general chat flood limiter
- * (src/session/rateLimit.ts) — AI mockup generation costs real money per
+ * (src/session/hotPath.ts) — AI mockup generation costs real money per
  * call (paid per image via the AI provider), so it needs its own, much
  * stricter cap independent of ordinary message throughput. A user who
  * passes the chat flood check could still hammer this specific expensive

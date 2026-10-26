@@ -1,8 +1,8 @@
 import { getEnv } from "../config/env.js";
 import { captureException, initSentry } from "../config/sentry.js";
 import { handleWhatsAppMessage } from "../conversation/orderFlow.js";
-import { checkRateLimit } from "../session/rateLimit.js";
-import { acquireChatLock, releaseChatLock } from "../session/chatLock.js";
+import { begin, finish, abort } from "../session/hotPath.js";
+import { runWithDraft } from "../session/draftStore.js";
 import { COPY } from "../conversation/copy.js";
 import { sendMessage } from "../whatsapp/metaClient.js";
 import {
@@ -29,25 +29,49 @@ async function handleMessageInner(chatId: string, message: any) {
     initialized = true;
   }
 
-  // Flood control
-  const allowed = await checkRateLimit(chatId);
-  console.log(`[bot] rate limit allowed=${allowed}`);
-  if (!allowed) {
-    setTimingStep("rateLimited");
-    await sendMessage(chatId, COPY.floodCooldown).catch(() => {});
+  // One Redis round-trip: dedupe + lock + flood control + draft load.
+  const msgId: string | undefined = message?.id ? String(message.id) : undefined;
+  const start = await begin(chatId, msgId);
+  if (!start.isNew) {
+    setTimingStep("duplicate");
     return;
   }
-
-  // Busy lock
-  const claimed = await acquireChatLock(chatId);
-  console.log(`[bot] lock claimed=${claimed}`);
-  if (!claimed) {
+  if (!start.locked) {
     setTimingStep("busy");
     await sendMessage(chatId, COPY.busyReprompt).catch(() => {});
     return;
   }
+  if (!start.allowed) {
+    setTimingStep("rateLimited");
+    await finish(chatId, start.token, undefined).catch(() => {});
+    await sendMessage(chatId, COPY.floodCooldown).catch(() => {});
+    return;
+  }
 
-  try {
+  let failed = false;
+  const draftCtx = await runWithDraft(chatId, start.draft, async (ctx) => {
+    try {
+      await routeMessage(chatId, message);
+    } catch (err: any) {
+      failed = true;
+      console.error("Unhandled bot error:", err);
+      captureException(err);
+    }
+    return ctx;
+  });
+
+  // One Redis round-trip: save the draft change + release the lock.
+  // On failure the draft change is dropped and the dedupe marker deleted,
+  // so Meta's redelivery is processed from the last good state.
+  await finish(chatId, start.token, failed ? undefined : draftCtx.pending).catch((err) => {
+    console.error("[bot] finish failed:", err);
+    captureException(err);
+  });
+  if (failed) await abort(msgId).catch(() => {});
+}
+
+async function routeMessage(chatId: string, message: any) {
+  {
     const input =
       message.text?.body ||
       message.interactive?.button_reply?.id ||
@@ -98,10 +122,5 @@ async function handleMessageInner(chatId: string, message: any) {
     console.log(`[bot] calling handleWhatsAppMessage`);
     await handleWhatsAppMessage(chatId, message);
     console.log(`[bot] handleWhatsAppMessage completed`);
-  } catch (err: any) {
-    console.error("Unhandled bot error:", err);
-    captureException(err);
-  } finally {
-    await releaseChatLock(chatId).catch(() => {});
   }
 }

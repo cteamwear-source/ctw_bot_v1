@@ -1,20 +1,17 @@
 /**
- * T1 latency budget harness (baseline).
+ * Latency budget harness.
  *
  * Drives a static step through the real `handleMessage` entry point with
  * the FakeRedis + injected WhatsApp transport, and records how many Redis
- * round-trips and WhatsApp sends one customer message costs. The asserted
- * numbers DOCUMENT TODAY'S BEHAVIOUR (before T2/T4); later tasks tighten
- * them to the plan's budget (2 Redis round-trips, 1 send per static step).
+ * round-trips and WhatsApp sends one customer message costs.
  *
- * Current (baseline) numbers this file pins:
- *  - tier button press, fresh instance (no in-memory draft): 2 Redis
- *    round-trips (GET sess, fire-and-forget SET sess) and 1 send.
- *  - tier button press, warm instance (draft in memory cache): 1 Redis
- *    round-trip (the SET only). Dedupe, chat lock and rate limit are
- *    in-memory today, so they cost 0 Redis calls.
- *  - unrecognised input at the tier step (reprompt): 1 Redis round-trip
- *    (GET sess) and 2 sends (COPY.genericReprompt, then the menu).
+ * Numbers this file pins (after T2):
+ *  - every static step costs exactly 2 Redis round-trips: the `begin`
+ *    pipeline (dedupe + lock + rate limit + GET sess) and the `finish`
+ *    pipeline (SET sess + token-checked unlock).
+ *  - tier button press: 1 send.
+ *  - unrecognised input at the tier step (reprompt): 2 sends
+ *    (COPY.genericReprompt, then the menu) until T4 merges them.
  */
 
 import "./support/testEnv.js";
@@ -23,7 +20,7 @@ import assert from "node:assert/strict";
 import { FakeRedis } from "./support/fakeRedis.js";
 import { __setRedisForTests } from "../src/session/redisClient.js";
 import { __setTransportForTests } from "../src/whatsapp/metaClient.js";
-import { __clearMemoryDraftsForTests, loadDraft } from "../src/session/draftStore.js";
+import { loadDraft } from "../src/session/draftStore.js";
 import { __setTimingSinkForTests, maskMsgId, type TimingLine } from "../src/shared/timing.js";
 import { handleMessage } from "../src/bot/index.js";
 import { COPY } from "../src/conversation/copy.js";
@@ -66,14 +63,12 @@ function textMsg(msgId: string, body: string) {
 
 async function seedDraft(draft: OrderDraft): Promise<void> {
   await redis.set(`sess:${CHAT}`, draft, { ex: 86400 });
-  __clearMemoryDraftsForTests();
   redis.resetCounters();
 }
 
 beforeEach(() => {
   redis = new FakeRedis();
   __setRedisForTests(redis);
-  __clearMemoryDraftsForTests();
   sends = [];
   timingLines = [];
   fetchCalls = 0;
@@ -100,13 +95,13 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-test("baseline: tier button press on a fresh instance = 2 Redis round-trips, 1 send", async () => {
+test("budget: tier button press = exactly 2 Redis round-trips (begin + finish pipelines), 1 send", async () => {
   await seedDraft(draftAtTierStep());
 
   await handleMessage(CHAT, buttonReply("wamid.HBgMOTE5ODc2NTQzMjEwFQIAEhgUM0EwQTEyMzQ1Njc4OUFCQ0RFRjAA", "tier:standard", "Standard"));
 
-  assert.equal(redis.roundTrips, 2, "GET sess + fire-and-forget SET sess (dedupe/lock/rate limit are in-memory today)");
-  assert.equal(redis.pipelineExecs, 0, "no pipelines yet");
+  assert.equal(redis.roundTrips, 2, "begin pipeline + finish pipeline, nothing else");
+  assert.equal(redis.pipelineExecs, 2, "both round-trips are pipelines");
   assert.equal(sends.length, 1, "one WhatsApp send: the fabric menu");
   assert.equal(fetchCalls, 0, "all sends go through the injected transport");
 
@@ -119,23 +114,23 @@ test("baseline: tier button press on a fresh instance = 2 Redis round-trips, 1 s
   assert.equal(draft?.tier, "standard");
 });
 
-test("baseline: tier button press on a warm instance (draft cached in memory) = 1 Redis round-trip", async () => {
+test("budget: second message on a warm instance still = exactly 2 Redis round-trips", async () => {
   await seedDraft(draftAtTierStep());
-  await loadDraft(CHAT); // warms the in-memory cache
-  redis.resetCounters();
+  await handleMessage(CHAT, buttonReply("wamid.warm000000", "tier:standard", "Standard"));
+  await seedDraft(draftAtTierStep());
 
   await handleMessage(CHAT, buttonReply("wamid.warm000001", "tier:basic", "Basic"));
 
-  assert.equal(redis.roundTrips, 1, "only the fire-and-forget SET; the stale-prone memory cache skips the GET");
-  assert.equal(sends.length, 1);
+  assert.equal(redis.roundTrips, 2, "no memory cache: draft always comes from the begin pipeline");
+  assert.equal(sends.length, 2);
 });
 
-test("baseline: reprompt at the tier step = 1 Redis round-trip, 2 sends", async () => {
+test("budget: reprompt at the tier step = exactly 2 Redis round-trips, 2 sends", async () => {
   await seedDraft(draftAtTierStep());
 
   await handleMessage(CHAT, textMsg("wamid.reprompt0001", "something else"));
 
-  assert.equal(redis.roundTrips, 1, "GET sess only; nothing saved on reprompt");
+  assert.equal(redis.roundTrips, 2, "begin + finish (unlock only; nothing saved on reprompt)");
   assert.equal(sends.length, 2, "COPY.genericReprompt text, then the tier menu");
   assert.equal(sends[0]!.body.text?.body, COPY.genericReprompt);
   assert.equal(sends[1]!.body.interactive?.body?.text, COPY.welcome);

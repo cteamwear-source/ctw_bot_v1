@@ -27,7 +27,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import crypto from "node:crypto";
 import { getEnv } from "../src/config/env.js";
-import { claimUpdate } from "../src/session/dedupe.js";
 import { BUILD_STAMP } from "../src/config/version.js";
 import { handleMessage } from "../src/bot/index.js";
 
@@ -193,11 +192,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       for (const entry of entries) {
         for (const change of (entry.changes ?? [])) {
           for (const message of (change.value?.messages ?? [])) {
-            console.log(`[webhook] processing message ${message.id}`);
-            const isNew = await claimUpdate(message.id);
-            console.log(`[webhook] claimUpdate returned ${isNew} for ${message.id}`);
-            if (!isNew) continue;
-
+            // Dedupe (upd:<id>) happens inside handleMessage via hotPath.begin.
             const from = String(message.from || "");
             if (!from) continue;
 
@@ -214,8 +209,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!processed && Array.isArray((payload as any)?.messages)) {
       processed = true;
       for (const message of (payload as any).messages) {
-        const isNew = await claimUpdate(message.id);
-        if (!isNew) continue;
         const from = String(message.from || "");
         if (!from) continue;
         await handleMessage(`wa:${from}`, message);
