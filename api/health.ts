@@ -66,6 +66,25 @@ function buildEnvStatus() {
   };
 }
 
+/**
+ * Which outbound WhatsApp API host the deployment sends through, as a host
+ * TYPE only ("graph" = Meta direct, "emovur" = Emovur proxy, "other").
+ * Never returns the URL itself. Mirrors env.ts: unset means graph.facebook.com.
+ */
+export function metaApiHostType(baseUrl: string | undefined): "graph" | "emovur" | "other" {
+  const raw = (baseUrl ?? "").trim();
+  if (!raw) return "graph";
+  let host: string;
+  try {
+    host = new URL(raw).hostname.toLowerCase();
+  } catch {
+    return "other";
+  }
+  if (host === "graph.facebook.com") return "graph";
+  if (host === "backendprod.com" || host.endsWith(".backendprod.com")) return "emovur";
+  return "other";
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const info = getBuildInfo();
   const envStatus = buildEnvStatus();
@@ -119,6 +138,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     service: "custom-teamwear-bot",
     time: new Date().toISOString(),
     ...info,
+    metaApiHost: metaApiHostType(process.env.META_API_BASE_URL),
     envStatus,
   });
 }

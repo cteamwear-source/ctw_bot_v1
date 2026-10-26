@@ -1,0 +1,224 @@
+/**
+ * T1 latency budget harness (baseline).
+ *
+ * Drives a static step through the real `handleMessage` entry point with
+ * the FakeRedis + injected WhatsApp transport, and records how many Redis
+ * round-trips and WhatsApp sends one customer message costs. The asserted
+ * numbers DOCUMENT TODAY'S BEHAVIOUR (before T2/T4); later tasks tighten
+ * them to the plan's budget (2 Redis round-trips, 1 send per static step).
+ *
+ * Current (baseline) numbers this file pins:
+ *  - tier button press, fresh instance (no in-memory draft): 2 Redis
+ *    round-trips (GET sess, fire-and-forget SET sess) and 1 send.
+ *  - tier button press, warm instance (draft in memory cache): 1 Redis
+ *    round-trip (the SET only). Dedupe, chat lock and rate limit are
+ *    in-memory today, so they cost 0 Redis calls.
+ *  - unrecognised input at the tier step (reprompt): 1 Redis round-trip
+ *    (GET sess) and 2 sends (COPY.genericReprompt, then the menu).
+ */
+
+import "./support/testEnv.js";
+import { test, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import { FakeRedis } from "./support/fakeRedis.js";
+import { __setRedisForTests } from "../src/session/redisClient.js";
+import { __setTransportForTests } from "../src/whatsapp/metaClient.js";
+import { __clearMemoryDraftsForTests, loadDraft } from "../src/session/draftStore.js";
+import { __setTimingSinkForTests, maskMsgId, type TimingLine } from "../src/shared/timing.js";
+import { handleMessage } from "../src/bot/index.js";
+import { COPY } from "../src/conversation/copy.js";
+import type { OrderDraft } from "../src/conversation/draft.js";
+
+const CHAT = "wa:919876543210";
+
+let redis: FakeRedis;
+let sends: Array<{ url: string; body: any }>;
+let timingLines: TimingLine[];
+let fetchCalls: number;
+let originalFetch: typeof globalThis.fetch;
+
+/** Draft with every field before the tier step filled in. */
+function draftAtTierStep(): OrderDraft {
+  return {
+    orderType: "bulk",
+    garmentSilhouette: "collar",
+    qty: 100,
+    city: "Bengaluru",
+    name: "Suraj Kumar",
+    phone: "9876543210",
+    timeline: "standard",
+    updatedAt: Date.now(),
+  };
+}
+
+function buttonReply(msgId: string, id: string, title: string) {
+  return {
+    id: msgId,
+    from: "919876543210",
+    type: "interactive",
+    interactive: { type: "button_reply", button_reply: { id, title } },
+  };
+}
+
+function textMsg(msgId: string, body: string) {
+  return { id: msgId, from: "919876543210", type: "text", text: { body } };
+}
+
+async function seedDraft(draft: OrderDraft): Promise<void> {
+  await redis.set(`sess:${CHAT}`, draft, { ex: 86400 });
+  __clearMemoryDraftsForTests();
+  redis.resetCounters();
+}
+
+beforeEach(() => {
+  redis = new FakeRedis();
+  __setRedisForTests(redis);
+  __clearMemoryDraftsForTests();
+  sends = [];
+  timingLines = [];
+  fetchCalls = 0;
+  __setTransportForTests(async (url, init) => {
+    sends.push({ url, body: JSON.parse(String(init.body)) });
+    return new Response(JSON.stringify({ messages: [{ id: "wamid.fake" }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  __setTimingSinkForTests((line) => timingLines.push(line));
+  // Any send that bypasses the injected transport would show up here.
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    fetchCalls++;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+});
+
+afterEach(() => {
+  __setTransportForTests(undefined);
+  __setTimingSinkForTests(undefined);
+  __setRedisForTests(undefined);
+  globalThis.fetch = originalFetch;
+});
+
+test("baseline: tier button press on a fresh instance = 2 Redis round-trips, 1 send", async () => {
+  await seedDraft(draftAtTierStep());
+
+  await handleMessage(CHAT, buttonReply("wamid.HBgMOTE5ODc2NTQzMjEwFQIAEhgUM0EwQTEyMzQ1Njc4OUFCQ0RFRjAA", "tier:standard", "Standard"));
+
+  assert.equal(redis.roundTrips, 2, "GET sess + fire-and-forget SET sess (dedupe/lock/rate limit are in-memory today)");
+  assert.equal(redis.pipelineExecs, 0, "no pipelines yet");
+  assert.equal(sends.length, 1, "one WhatsApp send: the fabric menu");
+  assert.equal(fetchCalls, 0, "all sends go through the injected transport");
+
+  const menu = sends[0]!.body;
+  assert.equal(menu.type, "interactive");
+  assert.equal(menu.interactive.type, "button");
+  assert.equal(menu.interactive.body.text, COPY.fabricAsk);
+
+  const draft = await loadDraft(CHAT);
+  assert.equal(draft?.tier, "standard");
+});
+
+test("baseline: tier button press on a warm instance (draft cached in memory) = 1 Redis round-trip", async () => {
+  await seedDraft(draftAtTierStep());
+  await loadDraft(CHAT); // warms the in-memory cache
+  redis.resetCounters();
+
+  await handleMessage(CHAT, buttonReply("wamid.warm000001", "tier:basic", "Basic"));
+
+  assert.equal(redis.roundTrips, 1, "only the fire-and-forget SET; the stale-prone memory cache skips the GET");
+  assert.equal(sends.length, 1);
+});
+
+test("baseline: reprompt at the tier step = 1 Redis round-trip, 2 sends", async () => {
+  await seedDraft(draftAtTierStep());
+
+  await handleMessage(CHAT, textMsg("wamid.reprompt0001", "something else"));
+
+  assert.equal(redis.roundTrips, 1, "GET sess only; nothing saved on reprompt");
+  assert.equal(sends.length, 2, "COPY.genericReprompt text, then the tier menu");
+  assert.equal(sends[0]!.body.text?.body, COPY.genericReprompt);
+  assert.equal(sends[1]!.body.interactive?.body?.text, COPY.welcome);
+});
+
+test("timing: exactly one structured line per message with masked msgId and the step", async () => {
+  await seedDraft(draftAtTierStep());
+  const rawId = "wamid.HBgMOTE5ODc2NTQzMjEwFQIAEhgUSECRET123456";
+
+  await handleMessage(CHAT, buttonReply(rawId, "tier:standard", "Standard"));
+
+  assert.equal(timingLines.length, 1);
+  const line = timingLines[0]!;
+  assert.deepEqual(Object.keys(line).sort(), ["cold", "msgId", "redisMs", "sendMs", "step", "totalMs"]);
+  assert.equal(line.step, "tier");
+  assert.equal(line.msgId, maskMsgId(rawId));
+  assert.equal(line.msgId, "…123456");
+  assert.ok(!JSON.stringify(line).includes("SECRET"), "raw msgId never logged");
+  assert.equal(typeof line.cold, "boolean");
+  for (const k of ["redisMs", "sendMs", "totalMs"] as const) {
+    assert.ok(Number.isInteger(line[k]) && line[k] >= 0, `${k} is a non-negative integer`);
+  }
+  assert.ok(line.totalMs >= line.sendMs, "total covers the send");
+});
+
+test("timing: second message on the same instance reports cold=false", async () => {
+  await seedDraft(draftAtTierStep());
+  await handleMessage(CHAT, textMsg("wamid.first00001", "x"));
+  await handleMessage(CHAT, textMsg("wamid.second0001", "y"));
+  assert.equal(timingLines.length, 2);
+  assert.equal(timingLines[1]!.cold, false);
+});
+
+test("baseline: failing sends still record exactly one timing line; 3 attempts, none retried", async () => {
+  await seedDraft(draftAtTierStep());
+  let attempts = 0;
+  __setTransportForTests(async () => {
+    attempts++;
+    return new Response("bad", { status: 400 });
+  });
+
+  await handleMessage(CHAT, buttonReply("wamid.fail000001", "tier:standard", "Standard"));
+
+  // Baseline: interactive menu (400) → sendMenu's plain-text fallback (400)
+  // → processStep's generic error message (400). 3 attempts, no retries yet.
+  assert.equal(attempts, 3);
+  assert.equal(timingLines.length, 1);
+});
+
+// --- FakeRedis harness contract ---------------------------------------------
+
+test("fakeRedis: a pipeline exec counts as ONE round-trip and returns results in order", async () => {
+  const r = new FakeRedis();
+  const results = await r
+    .pipeline()
+    .set("upd:m1", 1, { nx: true, ex: 86400 })
+    .set("lock:c1", "tok", { nx: true, ex: 30 })
+    .incr("rl:c1:1")
+    .expire("rl:c1:1", 120)
+    .get("sess:c1")
+    .exec();
+
+  assert.deepEqual(results, ["OK", "OK", 1, 1, null]);
+  assert.equal(r.roundTrips, 1);
+  assert.equal(r.pipelineExecs, 1);
+  assert.equal(r.commands, 5);
+
+  const dup = await r.multi().set("upd:m1", 1, { nx: true }).exec();
+  assert.deepEqual(dup, [null], "SET NX inside a pipeline respects existing keys");
+  assert.equal(r.roundTrips, 2);
+});
+
+test("fakeRedis: eval lock-release deletes only for the token holder", async () => {
+  const r = new FakeRedis();
+  const RELEASE = `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`;
+  await r.set("lock:c1", "token-a", { nx: true, ex: 30 });
+
+  assert.equal(await r.eval(RELEASE, ["lock:c1"], ["token-b"]), 0, "wrong token keeps the lock");
+  assert.equal(await r.get("lock:c1"), "token-a");
+
+  const [released] = await r.pipeline().eval(RELEASE, ["lock:c1"], ["token-a"]).exec();
+  assert.equal(released, 1, "holder releases the lock (also inside a pipeline)");
+  assert.equal(await r.get("lock:c1"), null);
+
+  await assert.rejects(() => r.eval("return 1", [], []), /unsupported script/);
+});

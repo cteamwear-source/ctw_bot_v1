@@ -158,6 +158,33 @@ test("health: default GET keeps deploy-lag diagnostics but leaks no emails, key 
   assert.equal(resendFetches().length, 0);
 });
 
+test("health: metaApiHost reports the outbound API host type only (graph | emovur | other)", async () => {
+  const prev = process.env.META_API_BASE_URL;
+  const cases: Array<[string | undefined, string]> = [
+    [undefined, "graph"],
+    ["https://graph.facebook.com", "graph"],
+    ["https://metagraph.backendprod.com/", "emovur"],
+    ["https://bsp.example.com/wa-secret-path", "other"],
+    ["not a url", "other"],
+  ];
+  try {
+    for (const [base, expected] of cases) {
+      if (base === undefined) delete process.env.META_API_BASE_URL;
+      else process.env.META_API_BASE_URL = base;
+      const { req, res, getData } = createMockReqRes({});
+      await handler(req, res);
+      const data = getData();
+      assert.equal(data.metaApiHost, expected, `META_API_BASE_URL=${base ?? "(unset)"}`);
+      const serialized = JSON.stringify(data);
+      assert.ok(!serialized.includes("backendprod.com"), "host name never echoed");
+      assert.ok(!serialized.includes("wa-secret-path"), "URL path never echoed");
+    }
+  } finally {
+    if (prev === undefined) delete process.env.META_API_BASE_URL;
+    else process.env.META_API_BASE_URL = prev;
+  }
+});
+
 test("health: ?test_resend=1 without secret is rejected (401) and sends NO email", async () => {
   const { req, res, getStatusCode, getData } = createMockReqRes({ query: { test_resend: "1" } });
   await handler(req, res);

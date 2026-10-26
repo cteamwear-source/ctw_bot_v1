@@ -13,10 +13,16 @@ import {
 } from "../admin/actions.js";
 import { getChatPendingGenerationId } from "../mockup/generationStore.js";
 import { attachPaymentProof } from "../mockup/paidGeneration.js";
+import { runWithTiming, setTimingStep } from "../shared/timing.js";
 
 let initialized = false;
 
 export async function handleMessage(chatId: string, message: any) {
+  // One structured [timing] log line per message (src/shared/timing.ts).
+  return runWithTiming(message?.id, () => handleMessageInner(chatId, message));
+}
+
+async function handleMessageInner(chatId: string, message: any) {
   if (!initialized) {
     initSentry();
     getEnv(); // validate env
@@ -27,6 +33,7 @@ export async function handleMessage(chatId: string, message: any) {
   const allowed = await checkRateLimit(chatId);
   console.log(`[bot] rate limit allowed=${allowed}`);
   if (!allowed) {
+    setTimingStep("rateLimited");
     await sendMessage(chatId, COPY.floodCooldown).catch(() => {});
     return;
   }
@@ -35,6 +42,7 @@ export async function handleMessage(chatId: string, message: any) {
   const claimed = await acquireChatLock(chatId);
   console.log(`[bot] lock claimed=${claimed}`);
   if (!claimed) {
+    setTimingStep("busy");
     await sendMessage(chatId, COPY.busyReprompt).catch(() => {});
     return;
   }
@@ -53,10 +61,12 @@ export async function handleMessage(chatId: string, message: any) {
 
     // 1. Intercept admin button actions
     if (input?.startsWith("admin:")) {
+      setTimingStep("adminAction");
       await handleAdminAction(chatId, input, message);
       return;
     }
     if (input?.startsWith("mockupgen:")) {
+      setTimingStep("mockupGenAction");
       await handleMockupGenAction(chatId, input, message);
       return;
     }
@@ -64,7 +74,10 @@ export async function handleMessage(chatId: string, message: any) {
     // 2. Intercept admin typed commands (6-digit approval code, "CONFIRM <order>", etc.)
     if (input && isAuthorizedAdmin(chatId)) {
       const handled = await handleAdminTextCommand(chatId, input);
-      if (handled) return;
+      if (handled) {
+        setTimingStep("adminCommand");
+        return;
+      }
     }
 
     // 3. Paid mockup proof interception: customer sends proof photo while pending paid mockup
@@ -74,6 +87,7 @@ export async function handleMessage(chatId: string, message: any) {
         console.log(`[bot] Found pending paid generation ${pendingGenId} for ${chatId}, attaching payment proof`);
         const result = await attachPaymentProof(pendingGenId, imageId);
         if (result.ok) {
+          setTimingStep("paidMockupProof");
           await sendMessage(chatId, COPY.mockupPaidProofAck).catch(() => {});
           return;
         }

@@ -27,6 +27,7 @@ import { safeAppendOrderRow } from "../sheets/safeAppend.js";
 import { notifyAdmins } from "../admin/notify.js";
 import type { ProductId } from "../pricing/priceBook.js";
 import type { OrderData } from "../shared/types.js";
+import { setTimingStep } from "../shared/timing.js";
 
 
 // Basic WhatsApp Context
@@ -69,6 +70,7 @@ export async function handleWhatsAppMessage(chatId: string, message: any) {
 
   // 1. If currently awaiting cancel confirmation:
   if (draft.confirmingCancel) {
+    setTimingStep("cancelConfirm");
     if (
       lowerInput === "cancel:confirm" ||
       lowerInput === "yes" ||
@@ -97,6 +99,7 @@ export async function handleWhatsAppMessage(chatId: string, message: any) {
     lowerInput === "stop" ||
     lowerInput === "back_to_start"
   ) {
+    setTimingStep("cancel");
     draft.confirmingCancel = true;
     await saveDraft(chatId, draft);
     await sendMenu(
@@ -114,6 +117,7 @@ export async function handleWhatsAppMessage(chatId: string, message: any) {
 
   // 3. Global restart / reset command
   if (lowerInput === "/start" || lowerInput === "start" || lowerInput === "restart" || lowerInput === "reset") {
+    setTimingStep("start");
     await clearDraft(chatId);
     await promptNext(chatId, {}, false);
     return;
@@ -129,6 +133,7 @@ export async function handleWhatsAppMessage(chatId: string, message: any) {
     lowerInput === "nav:back" ||
     lowerInput === "⬅️ back"
   ) {
+    setTimingStep("back");
     if (draft.mockupDecision === "generate" || draft.mockupGenerated) {
       await sendMessage(
         chatId,
@@ -162,6 +167,7 @@ export async function handleWhatsAppMessage(chatId: string, message: any) {
     lowerInput === "order:catalogs" ||
     lowerInput === "catalog:download"
   ) {
+    setTimingStep("catalog");
     await sendMessage(chatId, COPY.catalogsListMessage);
     await promptNext(chatId, draft, false);
     return;
@@ -169,6 +175,7 @@ export async function handleWhatsAppMessage(chatId: string, message: any) {
 
   // Determine current step based on missing draft fields
   const step = determineStep(draft);
+  setTimingStep(step);
 
   try {
     console.log(`[orderFlow] calling processStep for step: ${step}`);

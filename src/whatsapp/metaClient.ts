@@ -1,4 +1,20 @@
 import { getEnv } from '../config/env.js';
+import { addSendMs } from '../shared/timing.js';
+
+/** HTTP transport used for every outbound Cloud API call (fetch-compatible). */
+export type MetaTransport = (url: string, init: RequestInit) => Promise<Response>;
+
+// Resolve globalThis.fetch at call time so tests that patch fetch keep working.
+const defaultTransport: MetaTransport = (url, init) => globalThis.fetch(url, init);
+let transport: MetaTransport = defaultTransport;
+
+/**
+ * Test seam: replace the HTTP transport used by all sends, or pass undefined
+ * to restore the default (global fetch). Never called in production code.
+ */
+export function __setTransportForTests(fn: MetaTransport | undefined): void {
+  transport = fn ?? defaultTransport;
+}
 
 /**
  * Call Meta WhatsApp Cloud API (or a Tech Provider wrapper, e.g. Emovur).
@@ -14,9 +30,11 @@ async function metaFetch(path: string, body: Record<string, unknown>): Promise<a
   console.log(`[metaClient] calling fetch: ${url}`);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 35000);
+  const startedAt = performance.now();
+  let sendTimed = false;
   
   try {
-    const res = await fetch(url, {
+    const res = await transport(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${env.META_API_TOKEN}`,
@@ -28,6 +46,8 @@ async function metaFetch(path: string, body: Record<string, unknown>): Promise<a
     });
     clearTimeout(timeoutId);
     const text = await res.text();
+    addSendMs(performance.now() - startedAt);
+    sendTimed = true;
     console.log(`[metaClient] fetch response status: ${res.status}`);
     if (!res.ok) {
       console.error(`[metaClient] ${path} failed ${res.status}: ${text}`);
@@ -36,6 +56,7 @@ async function metaFetch(path: string, body: Record<string, unknown>): Promise<a
     try { return JSON.parse(text); } catch { return text; }
   } catch (err) {
     clearTimeout(timeoutId);
+    if (!sendTimed) addSendMs(performance.now() - startedAt);
     console.error(`[metaClient] fetch error:`, err);
     throw err;
   }

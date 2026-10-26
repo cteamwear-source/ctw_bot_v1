@@ -1,5 +1,6 @@
 import { Redis } from "@upstash/redis";
 import { getEnv } from "../config/env.js";
+import { addRedisMs } from "../shared/timing.js";
 
 /**
  * The minimal subset of the Upstash Redis surface the mockup quota /
@@ -24,8 +25,35 @@ export interface RedisLike {
 let realClient: Redis | undefined;
 let testOverride: RedisLike | undefined;
 
+/**
+ * Wrap a client so every awaited command adds its elapsed time to the
+ * active per-message timing trace (src/shared/timing.ts). Outside a trace
+ * the wrapper only forwards. One wrapper per client, so identity is stable.
+ */
+const timedClients = new WeakMap<object, object>();
+function withTiming<T extends object>(client: T): T {
+  const cached = timedClients.get(client);
+  if (cached) return cached as T;
+  const proxy = new Proxy(client, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        const startedAt = performance.now();
+        const result = (value as (...a: unknown[]) => unknown).apply(target, args);
+        if (result && typeof (result as Promise<unknown>).then === "function") {
+          return (result as Promise<unknown>).finally(() => addRedisMs(performance.now() - startedAt));
+        }
+        return result;
+      };
+    },
+  });
+  timedClients.set(client, proxy);
+  return proxy;
+}
+
 export function getRedis(): Redis {
-  if (testOverride) return testOverride as unknown as Redis;
+  if (testOverride) return withTiming(testOverride) as unknown as Redis;
   if (!realClient) {
     const env = getEnv();
     realClient = new Redis({
@@ -33,7 +61,7 @@ export function getRedis(): Redis {
       token: env.REDIS_REST_TOKEN,
     });
   }
-  return realClient;
+  return withTiming(realClient);
 }
 
 /**
