@@ -16,7 +16,7 @@ import {
 import handler from "../api/admin-approve.js";
 import { saveOrderSnapshot, loadOrderSnapshot } from "../src/session/orderStore.js";
 import { notifyAdmins } from "../src/admin/notify.js";
-import { sendAdminOrderAlertEmail } from "../src/admin/email.js";
+import { sendAdminOrderAlertEmail, sendEmailWithResend } from "../src/admin/email.js";
 import { escapeHtml, jsonForScript } from "../src/shared/html.js";
 import { __resetEnvForTests } from "../src/config/env.js";
 import type { OrderData } from "../src/shared/types.js";
@@ -248,50 +248,67 @@ test("admin-approve POST resend_otp: generates secondary code via fail-safe", as
   const redis = new FakeRedis();
   __setRedisForTests(redis);
 
-  const order = createMockOrder("CTW-261014-05");
-  await saveOrderSnapshot(order);
-  const token = createPortalToken(order.orderId);
+  // CB-02: pin a configured RESEND_API_KEY so this exercises the real-dispatch
+  // (delivered) path; the simulated path is covered by the CB-02 tests below.
+  const restoreKey = pinResendKey("re_test_live_fake");
+  try {
+    const order = createMockOrder("CTW-261014-05");
+    await saveOrderSnapshot(order);
+    const token = createPortalToken(order.orderId);
 
-  const { req, res, getStatusCode, getData } = createMockReqRes({
-    method: "POST",
-    body: { orderId: order.orderId, token, action: "resend_otp" },
-  });
+    const { req, res, getStatusCode, getData } = createMockReqRes({
+      method: "POST",
+      body: { orderId: order.orderId, token, action: "resend_otp" },
+    });
 
-  await handler(req, res);
-  assert.equal(getStatusCode(), 200);
-  assert.equal(getData().ok, true);
-  assert.ok(getData().message.includes("Secondary verification code sent"));
+    await handler(req, res);
+    assert.equal(getStatusCode(), 200);
+    assert.equal(getData().ok, true);
+    assert.ok(getData().message.includes("Secondary verification code sent"));
+  } finally {
+    restoreKey();
+  }
 });
 
 test("notifyAdmins: snapshots order, generates OTP code, and does NOT send WhatsApp approval to admins", async () => {
   const redis = new FakeRedis();
   __setRedisForTests(redis);
 
-  const fetchCalls: Array<{ url: string; body: any }> = [];
-  globalThis.fetch = (async (url: any, init: any) => {
-    const body = init?.body ? (typeof init.body === "string" ? JSON.parse(init.body) : init.body) : {};
-    fetchCalls.push({ url: String(url), body });
-    return new Response(JSON.stringify({ id: "mock_res" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }) as any;
+  // CB-02: pin a configured RESEND_API_KEY — the email actually dispatches, so no
+  // WhatsApp fallback may fire here. (With an unconfigured key the fallback DOES
+  // fire; see the CB-02 tests below.)
+  const restoreKey = pinResendKey("re_test_live_fake");
+  try {
+    const fetchCalls: Array<{ url: string; body: any }> = [];
+    globalThis.fetch = (async (url: any, init: any) => {
+      const body = init?.body ? (typeof init.body === "string" ? JSON.parse(init.body) : init.body) : {};
+      fetchCalls.push({ url: String(url), body });
+      return new Response(JSON.stringify({ id: "mock_res" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as any;
 
-  const order = createMockOrder("CTW-261016-01");
-  await notifyAdmins(order, "https://example.com/receipt.jpg");
+    const order = createMockOrder("CTW-261016-01");
+    await notifyAdmins(order, "https://example.com/receipt.jpg");
 
-  // 1. Order snapshot saved with payment screenshot URL
-  const snapshot = await loadOrderSnapshot(order.orderId);
-  assert.ok(snapshot);
-  assert.equal(snapshot?.paymentScreenshotUrl, "https://example.com/receipt.jpg");
+    // 1. Order snapshot saved with payment screenshot URL
+    const snapshot = await loadOrderSnapshot(order.orderId);
+    assert.ok(snapshot);
+    assert.equal(snapshot?.paymentScreenshotUrl, "https://example.com/receipt.jpg");
 
-  // 2. Active 6-digit approval code generated
-  const activeCode = await getActiveApprovalCode("order", order.orderId);
-  assert.ok(activeCode);
-  assert.match(activeCode!, /^\d{6}$/);
+    // 2. Active 6-digit approval code generated
+    const activeCode = await getActiveApprovalCode("order", order.orderId);
+    assert.ok(activeCode);
+    assert.match(activeCode!, /^\d{6}$/);
 
-  // 3. No Meta Cloud API calls were made (no WhatsApp message sent to admins)
-  assert.ok(!fetchCalls.some((c) => c.url.includes("graph.facebook.com")));
+    // 3. Email was actually dispatched, and no Meta Cloud API call was made
+    //    (no WhatsApp message sent to admins)
+    assert.ok(fetchCalls.some((c) => c.url.includes("api.resend.com")), "email must be dispatched via Resend");
+    assert.ok(!fetchCalls.some((c) => c.url.includes("graph.facebook.com")));
+  } finally {
+    restoreKey();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -418,6 +435,221 @@ test("sendAdminOrderAlertEmail: escapes HTML email, keeps plain-text fallback ra
     if (prevApiKey === undefined) delete process.env["RESEND_API_KEY"];
     else process.env["RESEND_API_KEY"] = prevApiKey;
     __resetEnvForTests();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CB-02: silent money-event black hole — a SIMULATED email dispatch (missing /
+// blank / "re_test_dummy" RESEND_API_KEY) must count as NOT delivered so every
+// WhatsApp/text fallback fires (AGENTS.md invariant #3: money events never fail
+// silently), while a real dispatch must NOT trigger one. Simulation itself must
+// keep working (dev/test never hits the network) — it just may not suppress
+// fallbacks. All fetches here are stubbed.
+// ---------------------------------------------------------------------------
+
+/** Pins RESEND_API_KEY for one test (and busts the env cache); returns a restore fn. */
+function pinResendKey(value: string | undefined): () => void {
+  const prev = process.env["RESEND_API_KEY"];
+  if (value === undefined) delete process.env["RESEND_API_KEY"];
+  else process.env["RESEND_API_KEY"] = value;
+  __resetEnvForTests();
+  return () => {
+    if (prev === undefined) delete process.env["RESEND_API_KEY"];
+    else process.env["RESEND_API_KEY"] = prev;
+    __resetEnvForTests();
+  };
+}
+
+/** Stubs global fetch, recording every call as { url, body } and answering 200. */
+function recordFetch(): Array<{ url: string; body: any }> {
+  const calls: Array<{ url: string; body: any }> = [];
+  globalThis.fetch = (async (url: any, init: any) => {
+    let body: any = {};
+    try {
+      body = init?.body ? (typeof init.body === "string" ? JSON.parse(init.body) : init.body) : {};
+    } catch {
+      body = { raw: String(init?.body) };
+    }
+    calls.push({ url: String(url), body });
+    return new Response(JSON.stringify({ id: "mock_res", messages: [{ id: "mock_msg" }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as any;
+  return calls;
+}
+
+function whatsappBodies(calls: Array<{ url: string; body: any }>): string[] {
+  return calls
+    .filter((c) => c.url.includes("graph.facebook.com"))
+    .map((c) => String(c.body?.text?.body ?? ""));
+}
+
+test("CB-02: sendEmailWithResend flags simulated dispatch instead of faking a success", async () => {
+  // Missing / blank / whitespace / dummy key → simulated, never a network call.
+  for (const key of [undefined, "", "   ", "re_test_dummy"]) {
+    const restoreKey = pinResendKey(key);
+    try {
+      const calls = recordFetch();
+      const warns: string[] = [];
+      const logs: string[] = [];
+      const origWarn = console.warn;
+      const origLog = console.log;
+      console.warn = (...a: unknown[]) => { warns.push(a.map(String).join(" ")); };
+      console.log = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
+      try {
+        const res = await sendEmailWithResend({
+          to: ["admin@example.com"],
+          subject: "CB-02 simulated",
+          html: "<p>x</p>",
+        });
+        assert.equal(res.ok, true, "simulation must keep the flow alive (key=" + JSON.stringify(key) + ")");
+        assert.equal(res.simulated, true, "simulated dispatch must be flagged (key=" + JSON.stringify(key) + ")");
+        assert.ok(res.id?.startsWith("mock-"), "simulated id keeps the mock- shape");
+        assert.ok(warns.some((w) => /simulat/i.test(w)), "log line must say simulated");
+        assert.ok(!logs.some((l) => /dispatched successfully/i.test(l)), "no false 'dispatched successfully' log");
+        assert.equal(calls.length, 0, "simulation must never hit the network");
+      } finally {
+        console.warn = origWarn;
+        console.log = origLog;
+      }
+    } finally {
+      restoreKey();
+    }
+  }
+
+  // Configured key → real dispatch, no simulated flag.
+  const restoreKey = pinResendKey("re_test_live_fake");
+  try {
+    const calls = recordFetch();
+    const res = await sendEmailWithResend({ to: ["admin@example.com"], subject: "CB-02 real", html: "<p>x</p>" });
+    assert.equal(res.ok, true);
+    assert.equal(res.simulated, undefined, "real dispatch must not be flagged simulated");
+    assert.ok(calls.some((c) => c.url.includes("api.resend.com")), "must dispatch via Resend");
+  } finally {
+    restoreKey();
+  }
+});
+
+test("CB-02: notifyAdmins fires the WhatsApp fallback (with approval code) when the email was only simulated", async () => {
+  const redis = new FakeRedis();
+  __setRedisForTests(redis);
+
+  const restoreKey = pinResendKey(undefined);
+  try {
+    const calls = recordFetch();
+
+    const order = createMockOrder("CTW-261026-10");
+    await notifyAdmins(order, "https://example.com/receipt.jpg");
+
+    const activeCode = await getActiveApprovalCode("order", order.orderId);
+    assert.ok(activeCode, "approval code must still be generated");
+
+    assert.equal(
+      calls.filter((c) => c.url.includes("api.resend.com")).length,
+      0,
+      "simulation must not call Resend",
+    );
+
+    const bodies = whatsappBodies(calls);
+    assert.ok(bodies.length > 0, "WhatsApp fallback MUST fire when email delivery was only simulated");
+    assert.ok(bodies.some((b) => b.includes(activeCode!)), "fallback must carry the approval code");
+    assert.ok(bodies.some((b) => b.includes("Web Portal")), "fallback must carry the portal link");
+    assert.ok(
+      calls.filter((c) => c.url.includes("graph.facebook.com")).every((c) => c.body?.to === "999"),
+      "fallback must fan out to ADMIN_CHAT_IDS",
+    );
+  } finally {
+    restoreKey();
+  }
+});
+
+test("CB-02: notifyAdmins does NOT fall back when the email is really dispatched", async () => {
+  const redis = new FakeRedis();
+  __setRedisForTests(redis);
+
+  const restoreKey = pinResendKey("re_test_live_fake");
+  try {
+    const calls = recordFetch();
+
+    const order = createMockOrder("CTW-261026-11");
+    await notifyAdmins(order, "https://example.com/receipt.jpg");
+
+    assert.ok(calls.some((c) => c.url.includes("api.resend.com")), "email must be dispatched via Resend");
+    assert.equal(whatsappBodies(calls).length, 0, "no WhatsApp fallback on a real ok:true dispatch");
+  } finally {
+    restoreKey();
+  }
+});
+
+test("CB-02: admin-approve POST resend_otp reports honestly and WhatsAppes the code when email is simulated", async () => {
+  const redis = new FakeRedis();
+  __setRedisForTests(redis);
+
+  const restoreKey = pinResendKey(undefined);
+  try {
+    const calls = recordFetch();
+
+    const order = createMockOrder("CTW-261026-12");
+    await saveOrderSnapshot(order);
+    const token = createPortalToken(order.orderId);
+
+    const { req, res, getStatusCode, getData } = createMockReqRes({
+      method: "POST",
+      body: { orderId: order.orderId, token, action: "resend_otp" },
+    });
+    await handler(req, res);
+
+    assert.equal(getStatusCode(), 502, "must not claim the code was emailed");
+    assert.equal(getData().ok, false);
+    assert.match(String(getData().error), /not configured/i);
+
+    const code = await getActiveApprovalCode("order", order.orderId);
+    assert.ok(code);
+    assert.ok(String(getData().error).includes(code!), "error must surface the code so the admin can still use it");
+
+    assert.ok(
+      whatsappBodies(calls).some((b) => b.includes(code!)),
+      "fresh OTP must also fan out on WhatsApp",
+    );
+  } finally {
+    restoreKey();
+  }
+});
+
+test("CB-02: admin-approve GET resend_otp shows a warning banner and WhatsAppes the code when email is simulated", async () => {
+  const redis = new FakeRedis();
+  __setRedisForTests(redis);
+
+  const restoreKey = pinResendKey(undefined);
+  try {
+    const calls = recordFetch();
+
+    const order = createMockOrder("CTW-261026-13");
+    await saveOrderSnapshot(order);
+    const token = createPortalToken(order.orderId);
+
+    const { req, res, getStatusCode, getData } = createMockReqRes({
+      method: "GET",
+      query: { orderId: order.orderId, token, action: "resend_otp" },
+    });
+    await handler(req, res);
+    assert.equal(getStatusCode(), 200);
+
+    const html = String(getData());
+    assert.ok(html.includes("banner-warning"), "must render a warning banner, not a success one");
+    assert.ok(html.includes("email is not configured"), "banner must say the email was not configured");
+    assert.ok(!html.includes("dispatched to your email"), "must not claim delivery");
+
+    const code = await getActiveApprovalCode("order", order.orderId);
+    assert.ok(code);
+    assert.ok(html.includes(code!), "banner must embed the fresh code");
+    assert.ok(
+      whatsappBodies(calls).some((b) => b.includes(code!)),
+      "fresh OTP must also fan out on WhatsApp",
+    );
+  } finally {
+    restoreKey();
   }
 });
 

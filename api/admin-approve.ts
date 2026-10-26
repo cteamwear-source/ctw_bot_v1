@@ -14,6 +14,7 @@ import { renderConfirmationDm } from "../src/shared/render.js";
 import { escapeHtml, jsonForScript } from "../src/shared/html.js";
 import { sendMessage } from "../src/whatsapp/metaClient.js";
 import { sendSecondaryOtpEmail } from "../src/admin/email.js";
+import { notifyAdminsText } from "../src/admin/notify.js";
 import { getEnv } from "../src/config/env.js";
 
 function parseBody(req: VercelRequest): Record<string, any> {
@@ -68,7 +69,19 @@ async function handleGet(req: VercelRequest, res: VercelResponse) {
     const resend = await resendApprovalCode("order", orderId);
     if (resend.ok && resend.code) {
       const emailRes = await sendSecondaryOtpEmail(orderId, resend.code, getPortalUrl(orderId, token));
-      if (!emailRes.ok) {
+      if (emailRes.simulated) {
+        // CB-02: no API key → nothing was emailed. Put the code in front of the admin
+        // here AND fan out on WhatsApp so the money event is never silent.
+        await notifyAdminsText(
+          `🔐 *Secondary Approval Code for Order ${orderId}* (email not configured — sent here)\n\n` +
+          `Code: \`${resend.code}\` (Valid 30 mins)\n` +
+          `👉 *Web Portal:* ${getPortalUrl(orderId, token)}`
+        ).catch(() => {});
+        banner = {
+          type: "warning",
+          message: `⚠️ Verification code generated [ ${resend.code} ], but email is not configured (RESEND_API_KEY missing) — it was NOT emailed. Use the code shown here or from admin WhatsApp.`,
+        };
+      } else if (!emailRes.ok) {
         banner = {
           type: "warning",
           message: `⚠️ Verification code generated [ ${resend.code} ], but email delivery failed: ${emailRes.error}. (Note: Resend test mode only delivers to the registered account email).`,
@@ -128,6 +141,21 @@ async function handlePost(req: VercelRequest, res: VercelResponse) {
 
     const portalUrl = getPortalUrl(orderId, token);
     const emailRes = await sendSecondaryOtpEmail(orderId, resend.code!, portalUrl);
+
+    // CB-02: simulated dispatch (RESEND_API_KEY unset) delivered nothing — never
+    // report "sent to admin email" for it. Fan the code out on WhatsApp instead.
+    if (emailRes.simulated) {
+      await notifyAdminsText(
+        `🔐 *Secondary Approval Code for Order ${orderId}* (email not configured — sent here)\n\n` +
+        `Code: \`${resend.code!}\` (Valid 30 mins)\n` +
+        `👉 *Web Portal:* ${portalUrl}`
+      ).catch(() => {});
+      return res.status(502).json({
+        ok: false,
+        error: `Code generated, but email is not configured (RESEND_API_KEY missing) — it was NOT emailed. Sent to admin WhatsApp instead. Code: ${resend.code}`,
+      });
+    }
+
     if (!emailRes.ok) {
       return res.status(502).json({
         ok: false,
@@ -815,7 +843,9 @@ function renderPortalHtml(props: PortalRenderProps): string {
         });
         const data = await res.json();
         if (data.ok) {
-          modalSuccess.textContent = "✅ Secondary OTP dispatched to your email! Please check your inbox.";
+          // CB-02: never hardcode a delivery claim here — the server decides whether
+          // the code was really emailed (simulated dispatch must not say "email").
+          modalSuccess.textContent = data.message || "✅ Secondary verification code generated.";
           modalSuccess.style.display = "block";
           modalError.style.display = "none";
           startCooldown(30);

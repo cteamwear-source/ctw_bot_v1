@@ -15,17 +15,37 @@ interface SendEmailPayload {
 }
 
 /**
+ * Result of a send attempt.
+ *
+ * CB-02: `ok:true` only means "the send did not throw / we did not break the flow".
+ * `simulated:true` means NOTHING left the system (`RESEND_API_KEY` missing, blank or
+ * `re_test_dummy`) — callers that own a WhatsApp/text fallback (invariant #3,
+ * "money events never fail silently") must treat `simulated` as NOT delivered.
+ */
+export interface EmailResult {
+  ok: boolean;
+  id?: string;
+  error?: string;
+  /** True when dispatch was simulated (no API key) — delivery did NOT happen. */
+  simulated?: boolean;
+}
+
+/**
  * Sends an email via Resend HTTPS REST API.
  * Never throws — catches errors and logs cleanly so the bot flow is not broken.
  */
-export async function sendEmailWithResend(payload: SendEmailPayload): Promise<{ ok: boolean; id?: string; error?: string }> {
+export async function sendEmailWithResend(payload: SendEmailPayload): Promise<EmailResult> {
   const env = getEnv();
   const apiKey = env.RESEND_API_KEY;
 
   if (!apiKey || apiKey.trim() === "" || apiKey === "re_test_dummy") {
-    console.warn(`[email] RESEND_API_KEY is not configured. Simulating email dispatch to: ${payload.to.join(", ")}`);
-    console.log(`[email] Subject: ${payload.subject}`);
-    return { ok: true, id: `mock-${Date.now()}` };
+    // CB-02: simulated dispatch is NOT a delivery. Keep `ok:true` (so dev/test flows
+    // don't break) but flag it so callers fall back instead of logging success.
+    console.warn(
+      `[email] RESEND_API_KEY is not configured — SIMULATED dispatch, NOT delivered to: ${payload.to.join(", ")}`,
+    );
+    console.log(`[email] Simulated subject: ${payload.subject}`);
+    return { ok: true, simulated: true, id: `mock-${Date.now()}` };
   }
 
   const from = payload.from || env.ADMIN_EMAIL_FROM || "Custom Teamwear <onboarding@resend.dev>";
@@ -97,7 +117,7 @@ export async function sendAdminOrderAlertEmail(
   portalUrl: string,
   resendOtpUrl: string,
   screenshotUrl?: string,
-): Promise<{ ok: boolean; id?: string; error?: string }> {
+): Promise<EmailResult> {
   const env = getEnv();
   const recipients = env.ADMIN_EMAILS;
 
@@ -271,7 +291,7 @@ export async function sendSecondaryOtpEmail(
   orderId: string,
   newCode: string,
   portalUrl: string,
-): Promise<{ ok: boolean; id?: string; error?: string }> {
+): Promise<EmailResult> {
   const env = getEnv();
   const recipients = env.ADMIN_EMAILS;
 

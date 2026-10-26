@@ -40,12 +40,18 @@ export async function notifyAdmins(order: OrderData, screenshotUrlOrId: string):
   // 5. Dispatch email via Resend to ADMIN_EMAILS
   try {
     const emailRes = await sendAdminOrderAlertEmail(order, code, portalUrl, resendOtpUrl, publicUrl);
-    if (!emailRes.ok) {
-      console.warn(`[notifyAdmins] Resend email warning for ${order.orderId}:`, emailRes.error);
-      // Fallback: Notify admins on WhatsApp if email dispatch failed
+    // CB-02: a simulated dispatch (RESEND_API_KEY unset) delivered nothing — it must
+    // NOT be logged as success or it would silently swallow the WhatsApp fallback
+    // (AGENTS.md invariant #3: money events never fail silently).
+    if (!emailRes.ok || emailRes.simulated) {
+      const reason = emailRes.simulated
+        ? "Email not configured (RESEND_API_KEY missing) — dispatch simulated, NOT delivered"
+        : emailRes.error;
+      console.warn(`[notifyAdmins] Admin order alert email NOT delivered for ${order.orderId}: ${reason}`);
+      // Fallback: Notify admins on WhatsApp if the email was not actually delivered
       await notifyAdminsText(
         `⚠️ *Admin Approval Email Failed for Order ${order.orderId}*\n\n` +
-        `Reason: ${emailRes.error}\n\n` +
+        `Reason: ${reason}\n\n` +
         `🔐 *Approval Code:* \`${code}\` (Valid 30 mins)\n` +
         `👉 *Web Portal:* ${portalUrl}`
       ).catch(() => {});
