@@ -25,6 +25,7 @@ import { renderQuoteCard } from "../shared/render.js";
 import type { ProductId } from "../pricing/priceBook.js";
 import type { OrderData } from "../shared/types.js";
 import { setTimingStep } from "../shared/timing.js";
+import { markCustomerNotified } from "../shared/customerNotified.js";
 
 
 // Basic WhatsApp Context
@@ -34,7 +35,24 @@ export interface WhatsAppContext {
   input: string; // The button payload, list payload, or text body
 }
 
+/**
+ * Entry point for the customer conversation. Every failure (draft load,
+ * cancel/back/start/catalog branches, processStep) gets exactly one
+ * COPY.genericError reply; the error is rethrown marked as notified so the
+ * caller drops the draft change, clears the dedupe marker and does not
+ * apologise twice.
+ */
 export async function handleWhatsAppMessage(chatId: string, message: any) {
+  try {
+    await routeOrderMessage(chatId, message);
+  } catch (error) {
+    console.error("Error in order flow:", error);
+    await sendMessage(chatId, COPY.genericError).catch(() => {});
+    throw markCustomerNotified(error);
+  }
+}
+
+async function routeOrderMessage(chatId: string, message: any) {
   // Log minimal metadata only — no PII (name, phone, media IDs, etc.)
   const msgType = message?.type ?? "unknown";
   console.log(`[orderFlow] msgType=${msgType} chatId=${chatId}`);
@@ -171,14 +189,9 @@ export async function handleWhatsAppMessage(chatId: string, message: any) {
   const step = determineStep(draft);
   setTimingStep(step);
 
-  try {
-    console.log(`[orderFlow] calling processStep for step: ${step}`);
-    await processStep(ctx, draft, step);
-    console.log(`[orderFlow] processStep completed`);
-  } catch (error) {
-    console.error("Error in processStep:", error);
-    await sendMessage(chatId, "An error occurred. Please try again.");
-  }
+  console.log(`[orderFlow] calling processStep for step: ${step}`);
+  await processStep(ctx, draft, step);
+  console.log(`[orderFlow] processStep completed`);
 }
 
 export function determineStep(draft: OrderDraft): string {

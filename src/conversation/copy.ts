@@ -121,6 +121,8 @@ export const COPY = {
   discardGoodbye: "No worries — cancelled. Send /start anytime.",
 
   genericReprompt: "Sorry, I didn't get that. Please use one of the buttons above.",
+  /** Sent once whenever handling a message fails (T8). */
+  genericError: "An error occurred. Please try again.",
   floodCooldown: "You're sending messages a bit fast — please slow down and try again in a moment. 🙏",
   busyReprompt: "⏳ Still working on your last message — one moment please.",
 

@@ -17,6 +17,7 @@
 import { GoogleSpreadsheet, type GoogleSpreadsheetWorksheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
 import { getEnv } from "../config/env.js";
+import { sheetsAttempt } from "./timeout.js";
 import { MOCKUP_GENERATIONS_HEADER, type MockupGenerationsRow } from "./mockupSchema.js";
 import type { MockupGeneration } from "../shared/types.js";
 import { notifyAdminsText } from "../admin/notify.js";
@@ -124,7 +125,7 @@ async function withRetries<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      return await fn();
+      return await sheetsAttempt(fn);
     } catch (err) {
       lastError = err;
       if (attempt < retries) await new Promise((r) => setTimeout(r, 300 * attempt));

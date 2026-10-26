@@ -10,6 +10,8 @@ import { isAuthorizedAdmin } from "../admin/auth.js";
 // Blob and the mockup pipeline: they are `await import()`ed only on the
 // paths that need them (T5 cold start).
 import { runWithTiming, setTimingStep } from "../shared/timing.js";
+import { customerWasNotified } from "../shared/customerNotified.js";
+import type { OrderDraft } from "../conversation/draft.js";
 
 let initialized = false;
 
@@ -19,51 +21,63 @@ export async function handleMessage(chatId: string, message: any) {
 }
 
 async function handleMessageInner(chatId: string, message: any) {
-  if (!initialized) {
-    initSentry();
-    getEnv(); // validate env
-    initialized = true;
-  }
-
-  // One Redis round-trip: dedupe + lock + flood control + draft load.
   const msgId: string | undefined = message?.id ? String(message.id) : undefined;
-  const start = await begin(chatId, msgId);
-  if (!start.isNew) {
-    setTimingStep("duplicate");
-    return;
-  }
-  if (!start.locked) {
-    setTimingStep("busy");
-    await sendMessage(chatId, COPY.busyReprompt).catch(() => {});
-    return;
-  }
-  if (!start.allowed) {
-    setTimingStep("rateLimited");
-    await finish(chatId, start.token, undefined).catch(() => {});
-    await sendMessage(chatId, COPY.floodCooldown).catch(() => {});
-    return;
-  }
-
+  // Lock token still to be released by `finish()` in the finally block.
+  let token: string | undefined;
+  let pending: OrderDraft | null | undefined;
   let failed = false;
-  const draftCtx = await runWithDraft(chatId, start.draft, async (ctx) => {
-    try {
-      await routeMessage(chatId, message);
-    } catch (err: any) {
-      failed = true;
-      console.error("Unhandled bot error:", err);
-      captureException(err);
-    }
-    return ctx;
-  });
 
-  // One Redis round-trip: save the draft change + release the lock.
-  // On failure the draft change is dropped and the dedupe marker deleted,
-  // so Meta's redelivery is processed from the last good state.
-  await finish(chatId, start.token, failed ? undefined : draftCtx.pending).catch((err) => {
-    console.error("[bot] finish failed:", err);
+  try {
+    if (!initialized) {
+      initSentry();
+      getEnv(); // validate env
+      initialized = true;
+    }
+
+    // One Redis round-trip: dedupe + lock + flood control + draft load.
+    const start = await begin(chatId, msgId);
+    if (!start.isNew) {
+      setTimingStep("duplicate");
+      return;
+    }
+    if (!start.locked) {
+      setTimingStep("busy");
+      await sendMessage(chatId, COPY.busyReprompt).catch(() => {});
+      return;
+    }
+    token = start.token;
+    if (!start.allowed) {
+      setTimingStep("rateLimited");
+      await finish(chatId, token, undefined).catch(() => {});
+      token = undefined;
+      await sendMessage(chatId, COPY.floodCooldown).catch(() => {});
+      return;
+    }
+
+    const draftCtx = await runWithDraft(chatId, start.draft, async (ctx) => {
+      await routeMessage(chatId, message);
+      return ctx;
+    });
+    pending = draftCtx.pending;
+  } catch (err: any) {
+    // Every failure gets exactly one customer reply (T8). The order flow
+    // sends its own and marks the error; everything else is apologised here.
+    failed = true;
+    console.error("Unhandled bot error:", err);
     captureException(err);
-  });
-  if (failed) await abort(msgId).catch(() => {});
+    if (!customerWasNotified(err)) {
+      await sendMessage(chatId, COPY.genericError).catch(() => {});
+    }
+  } finally {
+    // One Redis round-trip: save the draft change + release the lock.
+    // On failure the draft change is dropped and the dedupe marker deleted,
+    // so Meta's redelivery is processed from the last good state.
+    await finish(chatId, token, failed ? undefined : pending).catch((err) => {
+      console.error("[bot] finish failed:", err);
+      captureException(err);
+    });
+    if (failed) await abort(msgId).catch(() => {});
+  }
 }
 
 async function routeMessage(chatId: string, message: any) {

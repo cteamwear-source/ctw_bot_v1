@@ -12,6 +12,7 @@
 import { GoogleSpreadsheet, type GoogleSpreadsheetWorksheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
 import { getEnv } from "../config/env.js";
+import { sheetsAttempt } from "./timeout.js";
 import { CATALOG_SELECTIONS_HEADER, type CatalogSelectionsRow } from "./catalogSchema.js";
 import type { CatalogSelection } from "../shared/types.js";
 import { TIER_LABELS } from "../pricing/priceBook.js";
@@ -74,7 +75,7 @@ async function withRetries<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      return await fn();
+      return await sheetsAttempt(fn);
     } catch (err) {
       lastError = err;
       if (attempt < retries) {
