@@ -1069,7 +1069,8 @@ function assembleOrderData(chatId: string, draft: OrderDraft): OrderData {
     catalogSelection: draft.catalogSelection,
     qty,
     sizeSplit: draft.sizeSplit as OrderData["sizeSplit"],
-    printMethod: draft.printMethod!,
+    // Sample orders don't have a print method step; default to screen_print for sheet compatibility
+    printMethod: isSample ? "screen_print" : draft.printMethod!,
     city: draft.city!,
     name: draft.name!,
     phone: draft.phone!,

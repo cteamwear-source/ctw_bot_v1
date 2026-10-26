@@ -66,6 +66,8 @@ async function getOrdersSheet(): Promise<GoogleSpreadsheetWorksheet> {
 
 export function orderToRow(order: OrderData): OrdersRow {
   const product = getProduct(order.productId);
+  // Sample orders use a default printMethod; guard against undefined just in case
+  const printMethodLabel = order.printMethod ? getPrintMethod(order.printMethod).label : "";
   return {
     Timestamp: new Date().toISOString(),
     "Order ID": order.orderId,
@@ -79,7 +81,7 @@ export function orderToRow(order: OrderData): OrdersRow {
     XL: order.sizeSplit.XL,
     XXL: order.sizeSplit.XXL,
     "3XL": order.sizeSplit["3XL"],
-    "Print Method": getPrintMethod(order.printMethod).label,
+    "Print Method": printMethodLabel,
     "Logo Placement": logoPlacementSummary(order),
     City: order.city,
     Name: order.name,
