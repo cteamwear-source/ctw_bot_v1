@@ -750,9 +750,9 @@ async function processStep(ctx: WhatsAppContext, draft: OrderDraft, step: string
           draft.orderId = await nextOrderId();
         }
         
-        const order = assembleOrderData(chatId, draft);
-        await saveOrderSnapshot(order).catch(() => {});
-        await saveDraft(chatId, draft, true);
+        // The payment screen saves the order snapshot (once, after its sends);
+        // the draft is written by hotPath.finish() in the unlock round-trip.
+        await saveDraft(chatId, draft);
         await promptNext(chatId, draft);
       } else {
         await promptNext(chatId, draft, true);
@@ -976,7 +976,7 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false,
 
       if (!draft.orderId) {
         draft.orderId = await nextOrderId();
-        await saveDraft(chatId, draft, true);
+        await saveDraft(chatId, draft);
       }
 
       const order: OrderData = {
@@ -1007,9 +1007,9 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false,
         channel: "whatsapp",
       };
 
-      await saveOrderSnapshot(order).catch(() => {});
-
       // ---- S11 Payment ----
+      // Quote, QR and pay message go out first with nothing awaited in front
+      // of them; the order snapshot (written once) follows.
       const quoteText = await withHead(renderQuoteCard(order));
       const env = getEnv();
       await sendMessage(chatId, quoteText).catch((err) => {
@@ -1041,6 +1041,10 @@ async function promptNext(chatId: string, draft: OrderDraft, isReprompt = false,
       } else {
         await sendMessage(chatId, payMessage);
       }
+
+      await saveOrderSnapshot(order).catch((err) => {
+        console.error(`[promptNext:payment] Failed to save order snapshot for ${order.orderId}:`, err);
+      });
       break;
   }
 }
@@ -1095,8 +1099,11 @@ function assembleOrderData(chatId: string, draft: OrderDraft): OrderData {
 }
 
 async function completeOrder(chatId: string, draft: OrderDraft) {
-  // Acknowledge customer payment screenshot immediately
-  await sendMessage(chatId, COPY.screenshotAck);
+  // Acknowledge customer payment screenshot immediately. Guarded: a failed
+  // ack must never stop the money event reaching Sheets and the admins.
+  await sendMessage(chatId, COPY.screenshotAck).catch((err) => {
+    console.error(`[completeOrder] Failed to send screenshot ack:`, err);
+  });
 
   if (!draft.orderId) {
     draft.orderId = await nextOrderId();
@@ -1109,23 +1116,27 @@ async function completeOrder(chatId: string, draft: OrderDraft) {
     console.error(`[completeOrder] Failed to save order snapshot for ${order.orderId}:`, err);
   });
 
-  // 2. Safely append to Google Sheets CRM (escalates full text to admin if sheet fails)
-  let sheetWriteFailed = false;
-  try {
-    const { safeAppendOrderRow } = await import("../sheets/safeAppend.js");
-    await safeAppendOrderRow(order);
-  } catch (err) {
-    console.error(`[completeOrder] Sheet write failed for ${order.orderId}:`, err);
-    sheetWriteFailed = true;
-  }
-
-  // 3. Trigger admin email alert with 2-step OTP and Web Admin Portal link
+  // 2 + 3 in parallel: Sheets CRM append (escalates the full order as text to
+  // admins if it fails) and the admin alert (email OTP + portal link).
   const screenshotIdOrUrl = draft.paymentScreenshotId ?? "";
-  try {
-    const { notifyAdmins } = await import("../admin/notify.js");
-    await notifyAdmins(order, screenshotIdOrUrl);
-  } catch (err) {
-    console.error(`[completeOrder] notifyAdmins failed for ${order.orderId}:`, err);
+  const [sheetResult, notifyResult] = await Promise.allSettled([
+    (async () => {
+      const { safeAppendOrderRow } = await import("../sheets/safeAppend.js");
+      await safeAppendOrderRow(order);
+    })(),
+    (async () => {
+      const { notifyAdmins } = await import("../admin/notify.js");
+      // Copy: notifyAdmins sets paymentScreenshotUrl, which must not race
+      // into the concurrently built sheet row.
+      await notifyAdmins({ ...order }, screenshotIdOrUrl);
+    })(),
+  ]);
+  const sheetWriteFailed = sheetResult.status === "rejected";
+  if (sheetResult.status === "rejected") {
+    console.error(`[completeOrder] Sheet write failed for ${order.orderId}:`, sheetResult.reason);
+  }
+  if (notifyResult.status === "rejected") {
+    console.error(`[completeOrder] notifyAdmins failed for ${order.orderId}:`, notifyResult.reason);
   }
 
   // 4. Apologize gracefully if sheets write failed

@@ -20,9 +20,18 @@ export async function nextOrderId(): Promise<string> {
   const redis = getRedis();
   const dateKey = todayYYMMDD();
   const counterKey = `oid:${dateKey}`;
-  const n = await redis.incr(counterKey);
-  // Refresh TTL each time so the counter survives just past midnight if needed.
-  await redis.expire(counterKey, COUNTER_TTL_SECONDS);
+  // INCR + EXPIRE in one round-trip. The TTL is refreshed each time so the
+  // counter survives just past midnight if needed.
+  const pipeline = (redis as unknown as {
+    pipeline(): {
+      incr(key: string): unknown;
+      expire(key: string, seconds: number): unknown;
+      exec<T extends unknown[]>(): Promise<T>;
+    };
+  }).pipeline();
+  pipeline.incr(counterKey);
+  pipeline.expire(counterKey, COUNTER_TTL_SECONDS);
+  const [n] = await pipeline.exec<[number, unknown]>();
   const seq = String(n).padStart(2, "0");
   return `CTW-${dateKey}-${seq}`;
 }

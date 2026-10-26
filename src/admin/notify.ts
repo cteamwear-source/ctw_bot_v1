@@ -75,13 +75,16 @@ export async function notifyAdminsText(text: string): Promise<void> {
   // readable by everyone on the project, and are retained).
   console.log(`[notifyAdminsText] Escalation/Notice: ${redactForLog(text)}`);
 
-  for (const adminChatId of env.ADMIN_CHAT_IDS) {
-    try {
-      await sendMessage(adminChatId, text);
-    } catch (err) {
-      console.warn(`[notifyAdminsText] Failed to send text to admin ${adminChatId}:`, err);
-    }
-  }
+  // All admins in parallel; one failing admin never blocks the others.
+  await Promise.all(
+    env.ADMIN_CHAT_IDS.map(async (adminChatId) => {
+      try {
+        await sendMessage(adminChatId, text);
+      } catch (err) {
+        console.warn(`[notifyAdminsText] Failed to send text to admin ${adminChatId}:`, err);
+      }
+    }),
+  );
 }
 
 /** Strips approval codes and URL tokens from a message before it is logged. */
