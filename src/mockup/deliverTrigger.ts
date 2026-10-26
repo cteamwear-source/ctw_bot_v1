@@ -58,16 +58,31 @@ export async function triggerMockupDelivery(orderId: string): Promise<void> {
     console.warn(`[deliverTrigger] Fast in-process delivery error for ${orderId}, falling back to API:`, err);
   }
 
-  // 2. Fallback to standalone background function
-  const baseUrl = resolveBaseUrl();
+  // 2. Fallback to standalone background function.
+  // CB-04: /api/mockup-delivery requires the DEDICATED INTERNAL_MOCKUP_SECRET
+  // and fails closed (503) without it — it deliberately does NOT accept
+  // META_WEBHOOK_SECRET, so sending the webhook secret here only ever
+  // produced requests guaranteed to be rejected (visible only in logs; the
+  // customer silently never got their mockup prompt). Send only the real
+  // secret; when it is not configured, skip the dispatch entirely and say so
+  // loudly rather than firing a doomed request.
   const env = getEnv();
-  const secret = env.INTERNAL_MOCKUP_SECRET || env.META_WEBHOOK_SECRET;
+  if (!env.INTERNAL_MOCKUP_SECRET) {
+    console.error(
+      `[deliverTrigger] INTERNAL_MOCKUP_SECRET is not set — skipping the /api/mockup-delivery dispatch for ${orderId}. ` +
+        "The endpoint fails closed and would reject this request (503), so slow mockup generation would never run and " +
+        "the customer would silently never receive their mockup/paid-mockup prompt. " +
+        "Set INTERNAL_MOCKUP_SECRET to a long random string distinct from META_WEBHOOK_SECRET.",
+    );
+    return;
+  }
+  const baseUrl = resolveBaseUrl();
   try {
     const response = await fetch(`${baseUrl}/api/mockup-delivery`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-internal-secret": secret,
+        "x-internal-secret": env.INTERNAL_MOCKUP_SECRET,
       },
       body: JSON.stringify({ orderId }),
       signal: AbortSignal.timeout(TRIGGER_TIMEOUT_MS),

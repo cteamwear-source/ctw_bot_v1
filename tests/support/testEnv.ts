@@ -24,6 +24,10 @@ const DEFAULTS: Record<string, string> = {
   META_PHONE_NUMBER_ID: "1234567890",
   META_BUSINESS_ACCOUNT_ID: "0987654321",
   META_WEBHOOK_SECRET: "test-webhook-secret",
+  // CB-04: portal-token HMAC key is now required in one form or another.
+  // Provide it explicitly here (rather than relying on the META_WEBHOOK_SECRET
+  // fallback) so unit tests mirror a correctly-configured deployment.
+  ADMIN_PORTAL_SECRET: "test-portal-secret",
 };
 
 for (const [k, v] of Object.entries(DEFAULTS)) {

@@ -94,7 +94,19 @@ export interface Env {
   RESEND_API_KEY?: string;
   /** Sender address for order emails (default: Custom Teamwear <onboarding@resend.dev>). */
   ADMIN_EMAIL_FROM: string;
-  /** Secret used to HMAC-sign admin portal access URLs. */
+  /**
+   * Secret used to HMAC-sign admin portal access URLs (7-day tokens).
+   *
+   * Required in one form or another — there is NO hardcoded default (CB-04):
+   * a publicly known default would let anyone mint valid portal tokens for
+   * any order id (the `issue` action needs no OTP).
+   *
+   * Fallback chain: `ADMIN_PORTAL_SECRET` → `META_WEBHOOK_SECRET` (kept as a
+   * documented secondary fallback so existing deployments keep working).
+   * When NEITHER is set, getEnv() throws at cold start (invariant #4,
+   * fail-fast). Prefer setting a dedicated `ADMIN_PORTAL_SECRET` — reusing
+   * the webhook secret widens blast radius if it ever leaks.
+   */
   ADMIN_PORTAL_SECRET: string;
   /** Price (in whole rupees) charged per paid mockup generation once the monthly free quota is exhausted. */
   MOCKUP_PAID_PRICE_INR: number;
@@ -158,7 +170,19 @@ export function getEnv(): Env {
     .filter(Boolean);
 
   const adminEmailFrom = (process.env["ADMIN_EMAIL_FROM"] ?? "Custom Teamwear <onboarding@resend.dev>").trim();
-  const adminPortalSecret = (process.env["ADMIN_PORTAL_SECRET"] ?? process.env["META_WEBHOOK_SECRET"] ?? "ctw-portal-secret-key").trim();
+  // CB-04: portal-token HMAC key. Documented fallback chain is
+  // ADMIN_PORTAL_SECRET → META_WEBHOOK_SECRET (so existing deployments keep
+  // working), but there is NO hardcoded default anymore: a public default
+  // would let anyone mint valid 7-day portal tokens for any order id.
+  // Fail fast (invariant #4) when neither is configured.
+  const adminPortalSecret = (optional("ADMIN_PORTAL_SECRET") ?? optional("META_WEBHOOK_SECRET"))?.trim();
+  if (!adminPortalSecret) {
+    throw new Error(
+      "Missing required environment variable: ADMIN_PORTAL_SECRET (or a META_WEBHOOK_SECRET to fall back to). " +
+        "The admin portal HMAC secret must be configured in one form or another — " +
+        "no hardcoded default is allowed.",
+    );
+  }
 
   cached = {
     CHANNEL: "whatsapp",
