@@ -69,3 +69,44 @@ Mockup 5:
 ================================================================================
 Generated with OpenAI gpt-image-2.5-flare & Sharp compositing engine.
 ================================================================================
+
+--------------------------------------------------------------------------------
+PART 3: TEST RUN 2 - NEW TEMPLATES WITH 5 DIFFERENT COLORS
+--------------------------------------------------------------------------------
+Folder: test_mockups_sports/run2_new_colors/
+
+Mockup 1:
+- File: mockup_1_orange_dragons_polo_front.png
+- Garment: Finch Superia Mars (Standard Dry-Fit Athletic Polo)
+- Color: Vibrant Orange (#FF6600)
+- Logo: Red Dragons Athletics (Center Front)
+- Template: Newly updated 1086x1448 Polo Template
+
+Mockup 2:
+- File: mockup_2_olive_green_vipers_roundneck_front.png
+- Garment: Finch Superia Mars (Standard Dry-Fit Round Neck)
+- Color: Olive Military Green (#556B2F)
+- Logo: Apex Vipers Athletic Club (Center Front)
+- Template: Newly updated 1086x1448 Round Neck Template
+
+Mockup 3:
+- File: mockup_3_navy_blue_panthers_polo_front.png
+- Garment: Stellars Softberry Golf Polo (Branded Cotton Polo)
+- Color: Deep Navy Blue (#001F3F)
+- Logo: Cyber Panthers (Center Front)
+- Template: Newly updated 1086x1448 Polo Template
+
+Mockup 4:
+- File: mockup_4_white_dragons_roundneck_front.png
+- Garment: Stellars Softberry Crew (Branded Ring-Spun Cotton Round Neck)
+- Color: Crisp Pure White (#FFFFFF)
+- Logo: Red Dragons Athletics (Center Front)
+- Template: Newly updated 1086x1448 Round Neck Template
+
+Mockup 5:
+- File: mockup_5_maroon_vipers_polo_front.png
+- Garment: Stellars Nano-Dry Polo (Branded Performance Poly Polo)
+- Color: Deep Rich Maroon / Burgundy (#800000)
+- Logo: Apex Vipers Athletic Club (Left Chest Emblem)
+- Template: Newly updated 1086x1448 Polo Template
+
