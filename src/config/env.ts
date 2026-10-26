@@ -108,6 +108,17 @@ export interface Env {
    * the webhook secret widens blast radius if it ever leaks.
    */
   ADMIN_PORTAL_SECRET: string;
+  /**
+   * Secret protecting the daily heartbeat cron endpoint (`/api/heartbeat`,
+   * CB-05). Vercel automatically attaches `Authorization: Bearer
+   * ${CRON_SECRET}` to cron requests when this env var is set in project
+   * settings. When SET, the heartbeat handler requires a timing-safe match
+   * of that header (fail-closed: 401 without it). When UNSET the endpoint
+   * stays permissive for backwards compatibility with existing deployments,
+   * but logs a prominent warning on every invocation and reports
+   * `authConfigured: false` in its response. Optional by design.
+   */
+  CRON_SECRET?: string;
   /** Price (in whole rupees) charged per paid mockup generation once the monthly free quota is exhausted. */
   MOCKUP_PAID_PRICE_INR: number;
   /** Number of free mockup generations allowed per chat per Asia/Kolkata calendar month. */
@@ -197,6 +208,7 @@ export function getEnv(): Env {
     RESEND_API_KEY: optional("RESEND_API_KEY"),
     ADMIN_EMAIL_FROM: adminEmailFrom,
     ADMIN_PORTAL_SECRET: adminPortalSecret,
+    CRON_SECRET: optional("CRON_SECRET"),
     MERCHANT_VPA: required("MERCHANT_VPA"),
     STATIC_QR_URL: required("STATIC_QR_URL"),
     REDIS_REST_URL: required("REDIS_REST_URL"),
