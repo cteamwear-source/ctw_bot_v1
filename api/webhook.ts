@@ -308,6 +308,15 @@ function authenticateWebhookPost(
       ? "ok"
       : "invalid or missing URL token";
   }
+  if (process.env.ALLOW_UNVERIFIED_WEBHOOK === "true") {
+    if (!signatureWarningLogged) {
+      signatureWarningLogged = true;
+      console.warn(
+        "[webhook] Neither META_APP_SECRET nor META_WEBHOOK_URL_TOKEN is set; accepting unverified POSTs (ALLOW_UNVERIFIED_WEBHOOK=true).",
+      );
+    }
+    return "ok";
+  }
   if (process.env.VERCEL_ENV === "production") return "misconfigured";
   if (!signatureWarningLogged) {
     signatureWarningLogged = true;
